@@ -8,6 +8,7 @@ description = "Linux library and launcher for AppImages, native programs, and we
 anyhow = "1"
 backhand = "0.25"
 clap = { version = "4.6", features = ["derive"] }
+font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "ico"] }

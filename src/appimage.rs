@@ -32,6 +32,7 @@ pub fn detect_executable(path: &Path) -> Result<Kind> {
 #[derive(Default)]
 pub struct Metadata {
     pub name: Option<String>,
+    pub version: Option<String>,
     pub icon: Option<Icon>,
 }
 
@@ -80,6 +81,7 @@ fn read_type2_metadata(path: &Path) -> Option<Metadata> {
 
     let mut name = None;
     let mut icon_name = None;
+    let mut version = None;
     if let Some(entry) = entry {
         let mut in_main_group = false;
         for line in entry.lines() {
@@ -89,6 +91,12 @@ fn read_type2_metadata(path: &Path) -> Option<Metadata> {
             if in_main_group {
                 if let Some(value) = line.strip_prefix("Name=") {
                     name = Some(value.replace("\\s", " ").replace("\\\\", "\\"));
+                }
+                if let Some(value) = line
+                    .strip_prefix("X-AppImage-Version=")
+                    .filter(|value| !value.is_empty())
+                {
+                    version = Some(value.to_owned());
                 }
                 if let Some(value) = line.strip_prefix("Icon=") {
                     icon_name = Some(value.to_owned());
@@ -114,7 +122,11 @@ fn read_type2_metadata(path: &Path) -> Option<Metadata> {
                 .find_map(|node| read_member(&archive, &node.fullpath, crate::icons::MAX_SIZE))
         })
         .and_then(|(path, bytes)| Icon::from_bytes(bytes, Some(&path)).ok());
-    Some(Metadata { name, icon })
+    Some(Metadata {
+        name,
+        version,
+        icon,
+    })
 }
 
 fn read_member(archive: &FilesystemReader, path: &Path, limit: u64) -> Option<(PathBuf, Vec<u8>)> {

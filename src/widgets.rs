@@ -22,8 +22,11 @@ impl AssetSource for Glyphs {
             "grid" => "M4 4h6v6H4z M14 4h6v6h-6z M4 14h6v6H4z M14 14h6v6h-6z",
             "list" => "M9 6h11 M9 12h11 M9 18h11 M4 6h.01 M4 12h.01 M4 18h.01",
             "plus" => "M12 5v14 M5 12h14",
-            "close" => "M6 6l12 12 M18 6L6 18",
-            "check" => "M5 12l4 4L19 6",
+            "close" | "icons/close.svg" => "M6 6l12 12 M18 6L6 18",
+            "check" | "icons/check.svg" => "M5 12l4 4L19 6",
+            "copy" => "M8 8h12v12H8z M16 4H4v12",
+            "icons/chevron-down.svg" => "M6 9l6 6 6-6",
+            "icons/search.svg" => "M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0z M14.5 14.5L20 20",
             "alert" => "M12 8v5 M12 16h.01 M3 19h18L12 4z",
             "back" => "M19 12H5 M11 6l-6 6 6 6",
             _ => return Ok(None),
@@ -120,6 +123,7 @@ pub struct Control {
     icon: Option<&'static str>,
     tooltip: Option<SharedString>,
     disabled: bool,
+    compact: bool,
     click: Option<Click>,
 }
 
@@ -134,6 +138,7 @@ impl Control {
             icon: None,
             tooltip: None,
             disabled: false,
+            compact: false,
             click: None,
         }
     }
@@ -145,6 +150,11 @@ impl Control {
 
     pub fn icon(mut self, name: &'static str) -> Self {
         self.icon = Some(name);
+        self
+    }
+
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
         self
     }
 
@@ -214,13 +224,18 @@ impl RenderOnce for Control {
                 theme.transparent,
                 theme.danger.blend(theme.foreground.opacity(0.45)),
                 theme.danger,
-                theme.danger_foreground,
+                contrast_text(theme.danger, theme.danger_foreground),
             ),
         };
         let focus_ring = theme.ring;
         let radius = theme.radius;
         let foreground = if self.disabled { fg.opacity(0.5) } else { fg };
         let font_size = theme.font_size * 0.875;
+        let height = if self.compact {
+            px(22.)
+        } else {
+            theme.font_size * 2.
+        };
         let focus = window
             .use_keyed_state(self.id, cx, |_, cx| cx.focus_handle())
             .read(cx)
@@ -229,8 +244,8 @@ impl RenderOnce for Control {
             .flex()
             .items_center()
             .gap_2()
-            .h_8()
-            .when(self.label.is_none(), |this| this.w_8().justify_center())
+            .h(height)
+            .when(self.label.is_none(), |this| this.w(height).justify_center())
             .when(self.label.is_some(), |this| this.px_3())
             .rounded(radius)
             .bg(bg)
@@ -248,10 +263,33 @@ impl RenderOnce for Control {
                 this.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
             })
             .when_some(self.icon, |this, icon| {
-                this.child(glyph(icon, 16.).text_color(foreground))
+                this.child(glyph(icon, if self.compact { 13. } else { 16. }).text_color(foreground))
             })
             .when_some(self.label, |this, label| {
                 this.child(div().min_w_0().truncate().child(label))
             })
+    }
+}
+
+fn contrast_text(background: gpui::Hsla, preferred: gpui::Hsla) -> gpui::Hsla {
+    fn luminance(color: gpui::Hsla) -> f32 {
+        let color = gpui::Rgba::from(color);
+        let linear = |c: f32| {
+            if c < 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+    }
+    let bg = luminance(background);
+    let fg = luminance(preferred);
+    if (bg.max(fg) + 0.05) / (bg.min(fg) + 0.05) >= 4.5 {
+        preferred
+    } else if bg > 0.179 {
+        gpui::black()
+    } else {
+        gpui::white()
     }
 }

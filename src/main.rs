@@ -1,7 +1,9 @@
 mod appearance;
 mod appimage;
+mod color_picker;
 mod config;
 mod desktop;
+mod font_picker;
 mod icons;
 mod library;
 mod transaction;
@@ -31,7 +33,7 @@ enum Action {
     /// Register the app and AppImage Open With handler for the current user.
     InstallDesktop,
 
-    /// Add an AppImage, x86-64 executable, or web app.
+    /// Add an AppImage or x86-64 executable.
     Add(AddArgs),
 
     /// Import Gear Lever entries by desktop ID and take over their existing launchers.
@@ -63,7 +65,7 @@ enum Action {
 struct AddArgs {
     #[arg(value_enum)]
     kind: Kind,
-    /// Executable path or website URL.
+    /// Path to the AppImage or Linux executable.
     source: String,
     #[arg(long)]
     name: Option<String>,
@@ -113,7 +115,7 @@ fn run(cli: Cli) -> Result<()> {
             draft.move_appimage = args.move_appimage
                 || (args.kind == Kind::AppImage
                     && !args.keep_in_place
-                    && store.settings()?.move_appimages_by_default);
+                    && store.settings()?.image.move_to_directory);
             draft.description = args.description.unwrap_or_default();
             println!("Added {}", store.save(draft)?.id);
         }

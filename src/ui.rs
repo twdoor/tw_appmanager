@@ -14,15 +14,16 @@ use gpui::{
 };
 use gpui_component::{
     Root, Theme,
-    input::{Input, InputState},
-    menu::{ContextMenuExt, PopupMenuItem},
+    input::{Enter, Input, InputEvent, InputState},
 };
 
 use crate::{
     appearance::Appearance,
     appimage::detect_executable,
+    color_picker::{ColorPicker, PickerEvent, encode_color, parse_hex},
     config::{Preferences, View},
     desktop::ID,
+    font_picker::FontPicker,
     library::{Draft, Entry, Kind, Settings, Store, Target},
     widgets::{Control, Glyphs, app_icon, glyph},
 };
@@ -34,7 +35,12 @@ pub fn run(store: Store, paths: Vec<PathBuf>) -> Result<()> {
         .with_assets(Glyphs)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
-            let bounds = Bounds::centered(None, size(px(1020.), px(700.)), cx);
+            cx.bind_keys([gpui::KeyBinding::new(
+                "shift-enter",
+                Enter { secondary: false },
+                Some("DescriptionEditor > Input"),
+            )]);
+            let bounds = Bounds::centered(None, size(px(840.), px(700.)), cx);
             let window = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -77,7 +83,7 @@ pub fn run(store: Store, paths: Vec<PathBuf>) -> Result<()> {
 enum Page {
     Library,
     Edit(Box<Form>),
-    Settings(SettingsForm),
+    Settings(Box<SettingsForm>),
     Remove(Box<Form>),
 }
 
@@ -91,7 +97,12 @@ struct Manager {
     toast: Option<Toast>,
     preferences: Preferences,
     sidebar_drag: Option<(gpui::Pixels, f32)>,
+    sidebar_animation: Option<SidebarAnimation>,
     focus: gpui::FocusHandle,
+    scroll: gpui::ScrollHandle,
+    scroll_motion: Option<ScrollMotion>,
+    scroll_frame_pending: bool,
+    color_picker: Option<Entity<ColorPicker>>,
     busy: bool,
     appearance: Appearance,
     appearance_error: Option<String>,
@@ -105,6 +116,7 @@ impl Manager {
         cx: &mut Context<Self>,
     ) -> Self {
         let search = text_input("", "Search apps", window, cx);
+        Self::commit_input(&search, window, cx);
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
         let path = store.config_path();
         let system_font = Theme::global(cx).font_family.clone();
@@ -157,11 +169,18 @@ impl Manager {
             loop {
                 clock.timer(interval).await;
                 let Ok(active) = view.update_in(cx, |this, _, cx| {
+                    let animating = this.sidebar_animation.is_some();
+                    if let Some(animation) = &this.sidebar_animation {
+                        if animation.finished() {
+                            this.sidebar_animation = None;
+                        }
+                        cx.notify();
+                    }
                     let Some(toast) = &mut this.toast else {
-                        return false;
+                        return animating;
                     };
                     if toast.paused {
-                        return false;
+                        return animating;
                     }
                     let now = Instant::now();
                     toast.remaining = toast.remaining.saturating_sub(now - toast.updated);
@@ -170,11 +189,11 @@ impl Manager {
                         this.toast = None;
                     }
                     cx.notify();
-                    this.toast.is_some()
+                    animating || this.toast.is_some()
                 }) else {
                     break;
                 };
-                interval = Duration::from_millis(if active { 45 } else { 180 });
+                interval = Duration::from_millis(if active { 16 } else { 48 });
             }
         })
         .detach();
@@ -192,7 +211,7 @@ impl Manager {
                 && !event
                     .context_stack
                     .iter()
-                    .any(|context| context.contains("PopupMenu"));
+                    .any(|context| context.contains("PopupMenu") || context.contains("List"));
             if shortcut || escape {
                 let _ = view.update(cx, |this, cx| this.shortcut(&key.key, window, cx));
             }
@@ -210,7 +229,12 @@ impl Manager {
                 .map(|error| Toast::new(format!("Appearance: {error}"), true)),
             preferences,
             sidebar_drag: None,
+            sidebar_animation: None,
             focus: cx.focus_handle(),
+            scroll: gpui::ScrollHandle::new(),
+            scroll_motion: None,
+            scroll_frame_pending: false,
+            color_picker: None,
             busy: false,
             appearance,
             appearance_error,
@@ -235,6 +259,7 @@ impl Manager {
     }
 
     fn next_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_scroll();
         while let Some(path) = self.queue.pop_front() {
             let result = detect_executable(&path)
                 .with_context(|| format!("Could not open {}", path.display()))
@@ -266,11 +291,12 @@ impl Manager {
         let mut draft = Draft::new(kind, source);
         if kind == Kind::AppImage {
             match self.store.settings() {
-                Ok(settings) => draft.move_appimage = settings.move_appimages_by_default,
+                Ok(settings) => draft.move_appimage = settings.image.move_to_directory,
                 Err(error) => self.error(error),
             }
         }
         let form = Form::new(draft, window, cx);
+        form.connect_inputs(window, cx);
         cx.observe(&form.icon, |_, _, cx| cx.notify()).detach();
         let initial = if form.from_file_manager {
             &form.name
@@ -283,6 +309,7 @@ impl Manager {
 
     fn show_library(&mut self, filter: Option<Kind>, cx: &mut Context<Self>) {
         self.filter = filter;
+        self.reset_scroll();
         self.page = Page::Library;
         self.queue.clear();
         self.reload();
@@ -290,6 +317,7 @@ impl Manager {
     }
 
     fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_scroll();
         self.page = Page::Edit(Box::new(self.new_form(
             self.filter.unwrap_or(Kind::AppImage),
             String::new(),
@@ -299,15 +327,38 @@ impl Manager {
         cx.notify();
     }
 
-    fn show_settings(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        match self.store.settings() {
-            Ok(settings) => self.page = Page::Settings(SettingsForm::new(settings, window, cx)),
+    fn load_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let result = self.store.settings().and_then(|settings| {
+            let appearance = crate::config::local_appearance(&self.store.config_path())?;
+            Ok(SettingsForm::new(settings, appearance, window, cx))
+        });
+        match result {
+            Ok(form) => {
+                self.focus.focus(window);
+                self.page = Page::Settings(Box::new(form));
+            }
             Err(error) => self.error(error),
         }
         cx.notify();
     }
 
+    fn show_settings(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_scroll();
+        self.load_settings(window, cx);
+    }
+
+    fn commit_input(state: &Entity<InputState>, window: &Window, cx: &mut Context<Self>) {
+        cx.subscribe_in(state, window, |this, _, event, window, cx| {
+            if matches!(event, InputEvent::PressEnter { secondary: false }) {
+                this.focus.focus(window);
+                cx.notify();
+            }
+        })
+        .detach();
+    }
+
     fn edit(&mut self, entry: &Entry, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_scroll();
         let mut draft = Draft::new(entry.target.kind(), entry.target.display());
         draft.id = Some(entry.id.clone());
         draft.name = entry.name.clone();
@@ -317,6 +368,7 @@ impl Manager {
         draft.arguments = entry.arguments.clone();
         draft.working_directory = entry.working_directory.clone();
         let mut form = Form::new(draft, window, cx);
+        form.connect_inputs(window, cx);
         form.entry = Some(entry.clone());
         cx.observe(&form.icon, |_, _, cx| cx.notify()).detach();
         self.focus.focus(window);
@@ -357,18 +409,23 @@ impl Manager {
         let Page::Settings(form) = &self.page else {
             return;
         };
-        let settings = Settings {
-            appimage_directory: PathBuf::from(form.folder.read(cx).value().as_str()),
-            browser: PathBuf::from(form.browser.read(cx).value().as_str()),
-            move_appimages_by_default: form.move_default,
+        let settings = form.read_settings(cx);
+        let appearance = match form.read_theme(cx) {
+            Ok(appearance) => appearance,
+            Err(error) => {
+                self.error(error);
+                cx.notify();
+                return;
+            }
         };
         let store = self.store.clone();
         self.perform(
             window,
             cx,
-            move || store.save_settings(settings),
-            |this, (), _, _| {
+            move || store.save_settings(settings, appearance),
+            move |this, (), window, cx| {
                 this.toast = Some(Toast::new("Settings saved".into(), false));
+                this.load_settings(window, cx);
             },
         );
     }
@@ -470,6 +527,15 @@ impl Manager {
             .gap(px(self.appearance.layout.spacing * 2.))
     }
 
+    fn page_width(&self, window: &Window) -> f32 {
+        let layout = &self.appearance.layout;
+        (f32::from(window.viewport_size().width)
+            - self.visible_sidebar_width()
+            - 2. * layout.page_padding
+            - 2. * self.appearance.borders.window_width)
+            .clamp(1., layout.content_width)
+    }
+
     fn heading(&self, title: impl Into<SharedString>) -> gpui::Div {
         let size = self.appearance.typography.heading_size;
         div()
@@ -500,11 +566,6 @@ impl Manager {
             .child(self.input(state).disabled(disabled))
     }
 
-    fn frame(&self, mut element: gpui::Div) -> gpui::Div {
-        element.style().border_widths = border_widths(self.appearance.borders.width);
-        element
-    }
-
     fn persist_preferences(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = self.store.save_preferences(&self.preferences) {
             self.error(error);
@@ -512,20 +573,64 @@ impl Manager {
         cx.notify();
     }
 
+    fn sidebar_minimum(&self) -> f32 {
+        (self.appearance.typography.font_size * 7. + 60.).clamp(155., 290.)
+    }
+
     fn sidebar_width(&self) -> f32 {
         self.preferences
             .sidebar_width
             .unwrap_or(self.appearance.layout.sidebar_width)
-            .clamp(150., 320.)
+            .clamp(self.sidebar_minimum(), 340.)
+    }
+
+    fn sidebar_target(&self) -> f32 {
+        if self.preferences.sidebar_collapsed {
+            60.
+        } else {
+            self.sidebar_width()
+        }
+    }
+
+    fn visible_sidebar_width(&self) -> f32 {
+        self.sidebar_animation
+            .as_ref()
+            .map_or_else(|| self.sidebar_target(), SidebarAnimation::width)
+    }
+
+    fn set_sidebar_collapsed(&mut self, collapsed: bool) {
+        if self.preferences.sidebar_collapsed != collapsed {
+            let current = self.visible_sidebar_width();
+            self.preferences.sidebar_collapsed = collapsed;
+            self.sidebar_animation = Some(SidebarAnimation {
+                from: current,
+                to: self.sidebar_target(),
+                started: Instant::now(),
+            });
+        }
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.preferences.sidebar_collapsed = !self.preferences.sidebar_collapsed;
+        self.set_sidebar_collapsed(!self.preferences.sidebar_collapsed);
         self.persist_preferences(cx);
     }
 
+    fn resize_sidebar(&mut self, width: f32) {
+        let min = self.sidebar_minimum();
+        if width < min {
+            self.set_sidebar_collapsed(true);
+        } else {
+            self.preferences.sidebar_width = Some(width.clamp(min, 340.).round());
+            self.set_sidebar_collapsed(false);
+            if let Some(animation) = &mut self.sidebar_animation {
+                animation.to = self.preferences.sidebar_width.unwrap_or(min);
+            }
+        }
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let collapsed = self.preferences.sidebar_collapsed;
+        let collapsed = self.preferences.sidebar_collapsed
+            || self.visible_sidebar_width() < self.sidebar_minimum();
         let filters = [
             (None, "All apps", "library"),
             (Some(Kind::AppImage), "AppImages", "package"),
@@ -538,15 +643,11 @@ impl Manager {
             .flex_col()
             .flex_none()
             .h_full()
-            .w(px(if collapsed { 60. } else { self.sidebar_width() }))
+            .w(px(self.visible_sidebar_width()))
+            .overflow_hidden()
             .p_3()
             .gap_3()
             .bg(self.appearance.colors.sidebar.hsla())
-            .map(|mut this| {
-                this.style().border_widths.right = Some(px(self.appearance.borders.width).into());
-                this
-            })
-            .border_color(self.appearance.colors.border.unfocused.hsla())
             .child(
                 self.row()
                     .justify_between()
@@ -613,31 +714,30 @@ impl Manager {
                     .disabled(self.busy)
                     .on_click(cx.listener(Self::show_settings)),
             )
-            .when(!collapsed, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .right_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(px(6.))
-                        .id("sidebar-resize")
-                        .cursor(gpui::CursorStyle::ResizeLeftRight)
-                        .hover(|this| {
-                            this.bg(self.appearance.colors.accent_primary.hsla().opacity(0.3))
-                        })
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                                this.sidebar_drag = Some((event.position.x, this.sidebar_width()));
-                                cx.stop_propagation();
-                            }),
-                        ),
-                )
-            })
+            .child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(7.))
+                    .id("sidebar-resize")
+                    .cursor(gpui::CursorStyle::ResizeLeftRight)
+                    .hover(|this| {
+                        this.bg(self.appearance.colors.accent_primary.hsla().opacity(0.3))
+                    })
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                            this.sidebar_drag =
+                                Some((event.position.x, this.visible_sidebar_width()));
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
     }
 
-    fn library(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn library(&self, width: f32, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let search = self.search.read(cx).value().to_lowercase();
         let apps: Vec<_> = self
             .apps
@@ -663,18 +763,10 @@ impl Manager {
         };
         let grid = self.preferences.view == View::Grid;
         let gap = self.appearance.layout.spacing;
-        let occupied = if self.preferences.sidebar_collapsed {
-            60.
-        } else {
-            self.sidebar_width()
-        };
-        let width = (f32::from(window.viewport_size().width)
-            - occupied
-            - 2. * self.appearance.layout.page_padding
-            - 2. * self.appearance.borders.window_width
-            - 1.)
-            .min(self.appearance.layout.content_width)
-            .max(100.);
+        let button_width = f32::from(Theme::global(cx).font_size * 2.);
+        let inline_search = width - 2. * (button_width + gap);
+        let wrap_toolbar = inline_search < 80.;
+        let search_width = if wrap_toolbar { width } else { inline_search };
         let columns = ((width + gap) / (166. + gap)).floor().max(1.);
         let card_width = ((width - (columns - 1.) * gap) / columns).floor();
         self.column()
@@ -692,35 +784,42 @@ impl Manager {
             )
             .child(
                 self.row()
+                    .w(px(width))
+                    .when(wrap_toolbar, |this| this.flex_wrap())
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(self.input(&self.search).w_full()),
+                            .w(px(search_width))
+                            .flex_none()
+                            .overflow_hidden()
+                            .child(self.input(&self.search).min_w_0().w_full()),
                     )
-                    .children(
-                        [
-                            (View::List, "list", "List view"),
-                            (View::Grid, "grid", "Grid view"),
-                        ]
-                        .into_iter()
-                        .map(|(view, icon, label)| {
-                            self.button(icon)
-                                .icon(icon)
-                                .tooltip(label)
-                                .when(self.preferences.view == view, |this| this.primary())
-                                .when(self.preferences.view != view, |this| this.ghost())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.preferences.view = view;
-                                    this.persist_preferences(cx);
-                                }))
-                        }),
+                    .child(
+                        self.row().flex_none().children(
+                            [
+                                (View::List, "list", "List view"),
+                                (View::Grid, "grid", "Grid view"),
+                            ]
+                            .into_iter()
+                            .map(|(view, icon, label)| {
+                                self.button(icon)
+                                    .icon(icon)
+                                    .tooltip(label)
+                                    .when(self.preferences.view == view, |this| this.primary())
+                                    .when(self.preferences.view != view, |this| this.ghost())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.preferences.view = view;
+                                        this.persist_preferences(cx);
+                                    }))
+                            }),
+                        ),
                     ),
             )
             .child(
                 div()
                     .flex()
                     .gap(px(gap))
+                    .w_full()
+                    .min_w_0()
                     .when(grid, |this| this.flex_wrap())
                     .when(!grid, |this| this.flex_col())
                     .when(apps.is_empty(), |this| {
@@ -744,9 +843,8 @@ impl Manager {
     }
 
     fn card(&self, element: gpui::Div) -> gpui::Div {
-        rounded(self.frame(element), self.appearance.borders.card_radius)
+        rounded(element, self.appearance.borders.card_radius)
             .bg(self.appearance.colors.surface.hsla())
-            .border_color(self.appearance.colors.border.unfocused.hsla())
             .when(self.appearance.borders.shadows, |this| this.shadow_sm())
     }
 
@@ -785,7 +883,6 @@ impl Manager {
     ) -> gpui::AnyElement {
         let id = app.id.clone();
         let edit = app.clone();
-        let view = cx.weak_entity();
         let kind = app.target.kind();
         let focus_id = SharedString::from(format!("focus-{}", app.id));
         let focus = window
@@ -798,7 +895,11 @@ impl Manager {
             .surface
             .hsla()
             .blend(palette.accent_primary.hsla().opacity(0.13));
-        let subtitle = app.description().unwrap_or(kind.label()).to_owned();
+        let subtitle = app
+            .description()
+            .and_then(|text| text.lines().next())
+            .unwrap_or(kind.label())
+            .to_owned();
         let size = self.appearance.layout.icon_size * if grid_width.is_some() { 1.32 } else { 1. };
         let card = self
             .card(self.row())
@@ -838,22 +939,21 @@ impl Manager {
             .track_focus(&focus.tab_stop(true))
             .cursor_pointer()
             .hover(move |this| this.bg(hover))
-            .focus(move |this| this.border_color(focus_color))
-            .on_click(cx.listener(move |this, _, window, cx| this.edit(&edit, window, cx)));
+            .focus(move |this| this.bg(hover.blend(focus_color.opacity(0.16))))
+            .on_click(cx.listener(move |this, _, window, cx| this.edit(&edit, window, cx)))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, _, _, cx| {
+                    if let Err(error) = this.store.launch(&id, &[], false) {
+                        this.error(error);
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }),
+            );
         div()
             .id(SharedString::from(app.id.clone()))
-            .child(card.context_menu(move |menu, _, _| {
-                let view = view.clone();
-                let id = id.clone();
-                menu.item(PopupMenuItem::new("Launch").on_click(move |_, _, cx| {
-                    let _ = view.update(cx, |this, cx| {
-                        if let Err(error) = this.store.launch(&id, &[], false) {
-                            this.error(error);
-                            cx.notify();
-                        }
-                    });
-                }))
-            }))
+            .child(card)
             .into_any_element()
     }
 
@@ -929,7 +1029,7 @@ impl Manager {
                             if kind == Kind::AppImage
                                 && let Ok(settings) = this.store.settings()
                             {
-                                current.draft.move_appimage = settings.move_appimages_by_default;
+                                current.draft.move_appimage = settings.image.move_to_directory;
                             }
                             cx.notify();
                         }))
@@ -961,20 +1061,10 @@ impl Manager {
                         ),
                 )
             })
+            .child(self.field("Name", &form.name, self.busy))
             .child(
-                self.row()
-                    .items_start()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(self.field("Name", &form.name, self.busy)),
-                    )
-                    .child(div().flex_1().min_w_0().child(self.field(
-                        "Description",
-                        &form.description,
-                        self.busy,
-                    ))),
+                self.field("Description", &form.description, self.busy)
+                    .key_context("DescriptionEditor"),
             )
             .child(
                 self.card(self.row())
@@ -1137,55 +1227,211 @@ impl Manager {
 
     fn settings(&self, form: &SettingsForm, cx: &mut Context<Self>) -> impl IntoElement {
         self.column()
-            .child(self.heading("Settings"))
-            .child(self.path_field(
-                "appimage-directory",
-                "AppImages folder",
-                &form.folder,
-                true,
-                cx,
-            ))
             .child(
                 self.row()
                     .child(
-                        self.button("default-keep")
-                            .label("Keep by default")
-                            .when(!form.move_default, |button| button.primary())
+                        self.button("back")
+                            .ghost()
+                            .icon("back")
+                            .tooltip("Back")
                             .disabled(self.busy)
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.choose_default_move(false, cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))),
                     )
+                    .child(self.heading("Settings")),
+            )
+            .child(
+                self.settings_group("General")
+                    .child(self.path_field(
+                        "icons-directory",
+                        "Icons directory",
+                        &form.icons,
+                        true,
+                        cx,
+                    ))
                     .child(
-                        self.button("default-move")
-                            .label("Move by default")
-                            .when(form.move_default, |button| button.primary())
-                            .disabled(self.busy)
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.choose_default_move(true, cx)),
+                        self.setting_note(
+                            "Leave empty to store icons in the app’s data directory.",
+                        ),
+                    ),
+            )
+            .child(
+                self.settings_group("AppImages")
+                    .child(self.path_field(
+                        "appimage-directory",
+                        "Move directory",
+                        &form.folder,
+                        true,
+                        cx,
+                    ))
+                    .child(
+                        self.row()
+                            .child(
+                                self.button("default-keep")
+                                    .label("Keep in place")
+                                    .when(!form.move_default, |this| this.primary())
+                                    .disabled(self.busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.choose_default_move(false, cx)
+                                    })),
+                            )
+                            .child(
+                                self.button("default-move")
+                                    .label("Move on import")
+                                    .when(form.move_default, |this| this.primary())
+                                    .disabled(self.busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.choose_default_move(true, cx)
+                                    })),
                             ),
                     ),
             )
-            .child(self.path_field("web-browser", "Web app browser", &form.browser, false, cx))
             .child(
-                div()
-                    .text_color(self.appearance.colors.text_muted.hsla())
-                    .text_sm()
+                self.settings_group("Web apps")
+                    .child(self.path_field(
+                        "web-browser",
+                        "Browser executable",
+                        &form.browser,
+                        false,
+                        cx,
+                    ))
                     .child(
-                        "Choose an executable that supports app mode, such as Helium or Chromium.",
+                        self.setting_note(
+                            "Use a browser with app mode, such as Helium or Chromium.",
+                        ),
                     ),
             )
             .child(
-                self.row().child(
-                    self.button("save-settings")
-                        .primary()
-                        .label("Save settings")
-                        .disabled(self.busy)
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.save_settings(window, cx)),
-                        ),
-                ),
+                self.settings_group("Executables")
+                    .child(self.path_field(
+                        "default-working-directory",
+                        "Default working directory",
+                        &form.working_directory,
+                        true,
+                        cx,
+                    ))
+                    .child(
+                        self.setting_note("Leave empty to start each program from its own folder."),
+                    ),
             )
+            .child(self.appearance_settings(form, cx))
+    }
+
+    fn settings_group(&self, title: &'static str) -> gpui::Div {
+        self.card(self.column())
+            .p_4()
+            .gap_3()
+            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
+    }
+
+    fn settings_save_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div().absolute().right_5().bottom_4().child(
+            self.button("save-settings")
+                .primary()
+                .label(if self.busy {
+                    "Saving…"
+                } else {
+                    "Save settings"
+                })
+                .shadow_md()
+                .disabled(self.busy)
+                .on_click(cx.listener(|this, _, window, cx| this.save_settings(window, cx))),
+        )
+    }
+
+    fn setting_note(&self, text: &'static str) -> gpui::Div {
+        div()
+            .text_sm()
+            .text_color(self.appearance.colors.text_muted.hsla())
+            .child(text)
+    }
+
+    fn appearance_settings(&self, form: &SettingsForm, cx: &mut Context<Self>) -> impl IntoElement {
+        self.settings_group("Appearance")
+            .child(self.row().justify_between().flex_wrap()
+                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Palette"))
+                .child(self.row().children([(true, "Follow theme"), (false, "Local colors")].map(|(linked, label)| {
+                    self.button(label).label(label).disabled(self.busy)
+                        .when(form.use_included_colors == linked, |this| this.primary())
+                        .when(form.use_included_colors != linked, |this| this.ghost())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Page::Settings(form) = &mut this.page {
+                                form.use_included_colors = linked;
+                                cx.notify();
+                            }
+                        }))
+                }))))
+            .when(form.use_included_colors, |this| this.child(
+                self.setting_note("Theme includes can supply the palette. Picking a color switches to local colors.")
+            ))
+            .child(div().flex().flex_col().gap_1().children(form.colors.chunks(2).map(|row| {
+                self.row().children(row.iter().enumerate().map(|(index, color)| {
+                    let key = color.key;
+                    let value = color.value;
+                    let label = color.label;
+                    let outline = self.appearance.colors.border.unfocused.hsla();
+                    let hover = self.appearance.colors.accent_primary.hsla();
+                    let focus = color.focus.clone();
+                    rounded(self.row(), self.appearance.borders.radius)
+                        .flex_1().min_w_0().h(px(40.)).px_2()
+                        .child(div().flex_none().size(px(24.)).rounded(px(self.appearance.borders.radius)).bg(value)
+                            .border_1().border_color(outline))
+                        .child(div().min_w_0().truncate().text_sm().child(label))
+                        .id(key)
+                        .track_focus(&focus).cursor_pointer()
+                        .hover(move |this| this.bg(hover.opacity(0.16)))
+                        .focus(move |this| this.bg(hover.opacity(0.22)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if !this.busy {
+                                this.open_color_picker(key, label, value, window, cx);
+                            }
+                        }))
+                        .when(index == 0 && row.len() == 1, |this| this.max_w(relative(0.5)))
+                }))
+            })))
+            .child(self.row().items_start().flex_wrap()
+                .child(div().flex_1().min_w(px(150.)).flex().flex_col()
+                    .gap(px(self.appearance.layout.spacing * 0.5))
+                    .child("Font family")
+                    .child(form.font_family.clone()))
+                .child(div().w(px(120.)).child(self.field("Font size", &form.font_size, self.busy)))
+                .child(div().w(px(120.)).child(self.field("Corner radius", &form.corner_radius, self.busy))))
+    }
+
+    fn open_color_picker(
+        &mut self,
+        key: &'static str,
+        label: &'static str,
+        value: gpui::Hsla,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let picker = cx.new(|cx| ColorPicker::new(key, label, value, window, cx));
+        cx.subscribe_in(
+            &picker,
+            window,
+            |this, _, event: &PickerEvent, window, cx| {
+                if let PickerEvent::Apply(key, value) = event
+                    && let Page::Settings(form) = &mut this.page
+                    && let Some(color) = form.colors.iter_mut().find(|color| color.key == *key)
+                {
+                    color.value = *value;
+                    form.use_included_colors = false;
+                }
+                this.color_picker = None;
+                this.focus.focus(window);
+                cx.notify();
+            },
+        )
+        .detach();
+        self.color_picker = Some(picker);
+        self.focus.focus(window);
+        cx.notify();
+    }
+
+    fn apply_color(&self, cx: &mut Context<Self>) {
+        if let Some(picker) = &self.color_picker {
+            picker.update(cx, |picker, cx| picker.apply(cx));
+        }
     }
 
     fn choose_default_move(&mut self, move_default: bool, cx: &mut Context<Self>) {
@@ -1252,6 +1498,70 @@ impl Manager {
 }
 
 impl Manager {
+    fn reset_scroll(&mut self) {
+        self.scroll_motion = None;
+        self.color_picker = None;
+        self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+    }
+
+    fn scroll_wheel(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let gpui::ScrollDelta::Lines(delta) = event.delta else {
+            self.scroll_motion = None;
+            return;
+        };
+        let limit = self.scroll.max_offset().height;
+        if delta.y == 0. || limit == px(0.) {
+            return;
+        }
+        let current = self.scroll.offset().y;
+        let target = (self
+            .scroll_motion
+            .as_ref()
+            .map_or(current, |motion| motion.to)
+            + px(delta.y * 36.))
+        .clamp(-limit, px(0.));
+        if target != current || self.scroll_motion.is_some() {
+            self.scroll_motion = Some(ScrollMotion {
+                from: current,
+                to: target,
+                started: Instant::now(),
+            });
+            self.request_scroll_frame(window, cx);
+            cx.notify();
+        }
+        cx.stop_propagation();
+    }
+
+    fn request_scroll_frame(&mut self, window: &Window, cx: &Context<Self>) {
+        if self.scroll_frame_pending {
+            return;
+        }
+        self.scroll_frame_pending = true;
+        let view = cx.weak_entity();
+        window.on_next_frame(move |window, cx| {
+            let _ = view.update(cx, |this, cx| {
+                this.scroll_frame_pending = false;
+                if let Some(motion) = &this.scroll_motion {
+                    let progress = (motion.started.elapsed().as_secs_f32() / 0.17).min(1.);
+                    let y =
+                        motion.from + (motion.to - motion.from) * (1. - (1. - progress).powi(3));
+                    this.scroll.set_offset(gpui::point(px(0.), y));
+                    if progress < 1. {
+                        this.request_scroll_frame(window, cx);
+                    } else {
+                        this.scroll_motion = None;
+                    }
+                    cx.notify();
+                }
+            });
+        });
+    }
+
     fn finish_resize(&mut self, cx: &mut Context<Self>) {
         if self.sidebar_drag.take().is_some() {
             self.persist_preferences(cx);
@@ -1293,6 +1603,17 @@ impl Manager {
             return;
         }
         let modifiers = event.keystroke.modifiers;
+        if self.color_picker.is_some() {
+            if event.keystroke.key == "enter"
+                && !event.keystroke.modifiers.modified()
+                && self.focus.is_focused(window)
+            {
+                self.apply_color(cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+            return;
+        }
         let focus_free = window.focused(cx).is_none_or(|handle| handle == self.focus);
         match event.keystroke.key.as_str() {
             "enter" if !modifiers.modified() && focus_free => match self.page {
@@ -1308,6 +1629,20 @@ impl Manager {
 
     fn shortcut(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
+            return;
+        }
+        if self.color_picker.is_some() {
+            match key {
+                "escape" => {
+                    self.color_picker = None;
+                    self.focus.focus(window);
+                    cx.notify();
+                }
+                "enter" => self.apply_color(cx),
+                _ => return,
+            }
+            window.prevent_default();
+            cx.stop_propagation();
             return;
         }
         match key {
@@ -1356,9 +1691,10 @@ impl Manager {
                     .text_sm()
                     .child(toast.message.clone()),
             )
-            .child(div().w_8().flex_none().when(toast.paused, |this| {
+            .child(div().size(px(22.)).flex_none().when(toast.paused, |this| {
                 this.child(
                     self.button("dismiss-toast")
+                        .compact()
                         .ghost()
                         .icon("close")
                         .tooltip("Dismiss notification")
@@ -1370,13 +1706,16 @@ impl Manager {
             }));
         self.card(div())
             .absolute()
-            .bottom_4()
+            .bottom(px(if matches!(self.page, Page::Settings(_)) {
+                60.
+            } else {
+                16.
+            }))
             .right_4()
             .w(px(365.))
             .max_w(relative(0.88))
             .overflow_hidden()
             .shadow_md()
-            .border_color(accent.opacity(0.55))
             .child(container)
             .child(
                 div()
@@ -1402,8 +1741,9 @@ impl Manager {
 
 impl Render for Manager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = self.page_width(window);
         let body = match &self.page {
-            Page::Library => self.library(window, cx).into_any_element(),
+            Page::Library => self.library(width, window, cx).into_any_element(),
             Page::Edit(form) => self.editor(form, cx).into_any_element(),
             Page::Settings(form) => self.settings(form, cx).into_any_element(),
             Page::Remove(form) => self
@@ -1432,11 +1772,7 @@ impl Render for Manager {
         .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
             if let Some((origin, width)) = this.sidebar_drag {
                 if event.pressed_button == Some(gpui::MouseButton::Left) {
-                    this.preferences.sidebar_width = Some(
-                        (width + f32::from(event.position.x - origin))
-                            .clamp(150., 320.)
-                            .round(),
-                    );
+                    this.resize_sidebar(width + f32::from(event.position.x - origin));
                     cx.notify();
                 } else {
                     this.finish_resize(cx);
@@ -1474,10 +1810,14 @@ impl Render for Manager {
                 .child(
                     div()
                         .id("page-scroll")
+                        .track_scroll(&self.scroll)
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
                         .p(px(self.appearance.layout.page_padding))
+                        .when(matches!(self.page, Page::Settings(_)), |this| {
+                            this.pb(px(self.appearance.layout.page_padding + 62.))
+                        })
                         .on_mouse_down(
                             gpui::MouseButton::Left,
                             cx.listener(|this, _, window, cx| {
@@ -1489,15 +1829,45 @@ impl Render for Manager {
                         )
                         .child(
                             div()
-                                .max_w(px(self.appearance.layout.content_width))
+                                .w(px(width))
                                 .mx_auto()
+                                .on_scroll_wheel(cx.listener(Self::scroll_wheel))
                                 .child(body),
                         ),
                 )
+                .when(matches!(self.page, Page::Settings(_)), |this| {
+                    this.child(self.settings_save_button(cx))
+                })
                 .when_some(self.toast.as_ref(), |this, toast| {
                     this.child(self.toast_widget(toast, cx))
                 }),
         )
+        .when_some(self.color_picker.as_ref(), |this, picker| {
+            this.child(picker.clone())
+        })
+    }
+}
+
+struct ScrollMotion {
+    from: gpui::Pixels,
+    to: gpui::Pixels,
+    started: Instant,
+}
+
+struct SidebarAnimation {
+    from: f32,
+    to: f32,
+    started: Instant,
+}
+
+impl SidebarAnimation {
+    fn width(&self) -> f32 {
+        let progress = (self.started.elapsed().as_secs_f32() / 0.18).min(1.);
+        self.from + (self.to - self.from) * (1. - (1. - progress).powi(3))
+    }
+
+    fn finished(&self) -> bool {
+        self.started.elapsed() >= Duration::from_millis(180)
     }
 }
 
@@ -1553,7 +1923,12 @@ impl Form {
         Self {
             from_file_manager: draft.id.is_none() && !draft.source.is_empty(),
             name: text_input(&draft.name, "Use detected name", window, cx),
-            description: text_input(&draft.description, "Optional menu description", window, cx),
+            description: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .auto_grow(2, 6)
+                    .placeholder("Optional description")
+                    .default_value(draft.description.clone())
+            }),
             entry: None,
             source: text_input(&draft.source, source_hint, window, cx),
             icon: text_input(
@@ -1578,6 +1953,19 @@ impl Form {
         }
     }
 
+    fn connect_inputs(&self, window: &Window, cx: &mut Context<Manager>) {
+        for input in [
+            &self.source,
+            &self.name,
+            &self.icon,
+            &self.command,
+            &self.arguments,
+            &self.directory,
+        ] {
+            Manager::commit_input(input, window, cx);
+        }
+    }
+
     fn read(&self, cx: &App) -> Result<Draft> {
         let mut draft = self.draft.clone();
         draft.name = self.name.read(cx).value().to_string();
@@ -1598,29 +1986,211 @@ impl Form {
     }
 }
 
+struct ThemeColor {
+    key: &'static str,
+    label: &'static str,
+    original: gpui::Hsla,
+    value: gpui::Hsla,
+    focus: gpui::FocusHandle,
+}
+
 struct SettingsForm {
+    original: Settings,
     browser: Entity<InputState>,
     folder: Entity<InputState>,
+    icons: Entity<InputState>,
+    working_directory: Entity<InputState>,
     move_default: bool,
+    local_theme: toml::Table,
+    use_included_colors: bool,
+    colors: Vec<ThemeColor>,
+    font_family: Entity<FontPicker>,
+    font_size: Entity<InputState>,
+    corner_radius: Entity<InputState>,
 }
 
 impl SettingsForm {
-    fn new(settings: Settings, window: &mut Window, cx: &mut App) -> Self {
-        Self {
-            browser: text_input(
-                &settings.browser.to_string_lossy(),
-                "/usr/bin/helium",
-                window,
-                cx,
-            ),
-            folder: text_input(
-                &settings.appimage_directory.to_string_lossy(),
-                "~/Applications",
-                window,
-                cx,
-            ),
-            move_default: settings.move_appimages_by_default,
+    fn new(
+        settings: Settings,
+        appearance: toml::Table,
+        window: &mut Window,
+        cx: &mut Context<Manager>,
+    ) -> Self {
+        let browser = text_input(
+            &settings.web.browser_path.to_string_lossy(),
+            "/usr/bin/helium",
+            window,
+            cx,
+        );
+        let folder = text_input(
+            &settings.image.move_directory.to_string_lossy(),
+            "~/Applications",
+            window,
+            cx,
+        );
+        let icons = text_input(
+            &settings.icons_directory.to_string_lossy(),
+            "App data directory",
+            window,
+            cx,
+        );
+        let working_directory = text_input(
+            &settings.executable.working_directory.to_string_lossy(),
+            "Program’s own folder",
+            window,
+            cx,
+        );
+        for input in [&browser, &folder, &icons, &working_directory] {
+            Manager::commit_input(input, window, cx);
         }
+        let colors = [
+            ("background", "Background"),
+            ("sidebar", "Sidebar"),
+            ("surface", "Cards"),
+            ("text_primary", "Text"),
+            ("text_muted", "Muted text"),
+            ("accent_primary", "Primary accent"),
+            ("accent_secondary", "Secondary accent"),
+            ("accent_tertiary", "Tertiary accent"),
+            ("accent_text", "Text on accent"),
+            ("error", "Error"),
+            ("error_text", "Text on error"),
+        ]
+        .into_iter()
+        .filter_map(|(key, label)| {
+            let value = parse_hex(appearance.get("colors")?.get(key)?.as_str()?)?;
+            Some(ThemeColor {
+                key,
+                label,
+                original: value,
+                value,
+                focus: cx.focus_handle().tab_stop(true),
+            })
+        })
+        .collect();
+        let typography = appearance.get("typography");
+        let current_family = typography
+            .and_then(|table| table.get("font_family"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or("");
+        let font_family = cx.new(|cx| FontPicker::new(current_family.to_owned().into(), cx));
+        let font_size = text_input(
+            &typography
+                .and_then(|table| table.get("font_size"))
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "14".into()),
+            "14",
+            window,
+            cx,
+        );
+        let corner_radius = text_input(
+            &appearance
+                .get("borders")
+                .and_then(|borders| borders.get("card_radius"))
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "6".into()),
+            "6",
+            window,
+            cx,
+        );
+        Manager::commit_input(&corner_radius, window, cx);
+        Manager::commit_input(&font_size, window, cx);
+        Self {
+            move_default: settings.image.move_to_directory,
+            use_included_colors: appearance
+                .get("use_included_colors")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(true),
+            original: settings,
+            browser,
+            folder,
+            icons,
+            working_directory,
+            local_theme: appearance,
+            colors,
+            font_family,
+            font_size,
+            corner_radius,
+        }
+    }
+
+    fn read_settings(&self, cx: &App) -> Option<Settings> {
+        let mut settings = self.original.clone();
+        settings.web.browser_path = PathBuf::from(self.browser.read(cx).value().as_str().trim());
+        settings.image.move_directory = PathBuf::from(self.folder.read(cx).value().as_str().trim());
+        settings.icons_directory = PathBuf::from(self.icons.read(cx).value().as_str().trim());
+        settings.executable.working_directory =
+            PathBuf::from(self.working_directory.read(cx).value().as_str().trim());
+        settings.image.move_to_directory = self.move_default;
+        (settings != self.original).then_some(settings)
+    }
+
+    fn read_theme(&self, cx: &App) -> Result<Option<toml::Table>> {
+        let mut updated = self.local_theme.clone();
+        let was_included = self
+            .local_theme
+            .get("use_included_colors")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(true);
+        if was_included != self.use_included_colors {
+            updated.insert(
+                "use_included_colors".into(),
+                self.use_included_colors.into(),
+            );
+        }
+        let colors = updated
+            .get_mut("colors")
+            .and_then(toml::Value::as_table_mut)
+            .context("Missing palette")?;
+        for color in &self.colors {
+            if color.value != color.original {
+                colors.insert(color.key.to_owned(), encode_color(color.value).into());
+            }
+        }
+        let typography = updated
+            .get_mut("typography")
+            .and_then(toml::Value::as_table_mut)
+            .context("Missing typography")?;
+        let family = self.font_family.read(cx).family();
+        if typography.get("font_family").and_then(toml::Value::as_str) != Some(family) {
+            typography.insert("font_family".into(), family.into());
+        }
+        let size: f64 = self
+            .font_size
+            .read(cx)
+            .value()
+            .trim()
+            .parse()
+            .context("Font size requires a number")?;
+        let previous = typography.get("font_size").and_then(|value| {
+            value
+                .as_float()
+                .or_else(|| value.as_integer().map(|size| size as f64))
+        });
+        if previous != Some(size) {
+            typography.insert("font_size".into(), size.into());
+        }
+        let radius: f64 = self
+            .corner_radius
+            .read(cx)
+            .value()
+            .trim()
+            .parse()
+            .context("Corner radius requires a number")?;
+        let borders = updated
+            .get_mut("borders")
+            .and_then(toml::Value::as_table_mut)
+            .context("Missing borders table")?;
+        let previous = borders.get("card_radius").and_then(|value| {
+            value
+                .as_float()
+                .or_else(|| value.as_integer().map(|n| n as f64))
+        });
+        if previous != Some(radius) {
+            borders.insert("radius".into(), radius.into());
+            borders.insert("card_radius".into(), radius.into());
+        }
+        Ok((updated != self.local_theme).then_some(updated))
     }
 }
 

@@ -7,6 +7,9 @@ files = ["noctalia.toml"]
 view = "list"
 sidebar_collapsed = false
 
+[appearance]
+use_included_colors = true
+
 [appearance.colors]
 background = "#17191e"
 sidebar = "#1d2026"
@@ -40,6 +43,19 @@ icon_size = 40.0
 [appearance.borders]
 width = 1.0
 window_width = 0.0 # Optional border inside the app window.
-radius = 6.0
-card_radius = 12.0
+radius = 4.0
+card_radius = 6.0
 shadows = false
+
+[apps]
+icons_directory = "" # Empty uses the app's XDG data directory.
+
+[apps.image]
+move_directory = "~/Applications"
+move_to_directory = false
+
+[apps.web]
+browser_path = "/usr/bin/helium"
+
+[apps.executable]
+working_directory = "" # Empty starts programs from their own folder.

@@ -98,6 +98,12 @@ impl Appearance {
         Self::deserialize(default["appearance"].clone()).expect("valid bundled appearance")
     }
 
+    pub fn from_table(table: toml::Table) -> Result<Self> {
+        let appearance = Self::deserialize(toml::Value::Table(table))?;
+        appearance.validate()?;
+        Ok(appearance)
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let appearance = Self::deserialize(
             config::load(path)?
@@ -167,7 +173,10 @@ impl Appearance {
         colors.primary_foreground = palette.accent_text.hsla();
         colors.primary_hover = colors.primary.blend(colors.foreground.opacity(0.12));
         colors.primary_active = colors.primary.blend(colors.background.opacity(0.18));
-        colors.secondary = colors.muted;
+        colors.secondary = colors
+            .muted
+            .blend(colors.foreground.opacity(0.12))
+            .blend(colors.primary.opacity(0.08));
         colors.secondary_foreground = colors.foreground;
         colors.secondary_hover = colors.secondary.blend(colors.foreground.opacity(0.10));
         colors.secondary_active = colors.secondary.blend(colors.foreground.opacity(0.16));
@@ -179,6 +188,8 @@ impl Appearance {
         colors.popover_foreground = colors.foreground;
         colors.list = colors.muted;
         colors.list_hover = colors.secondary_hover;
+        colors.list_active = colors.primary.opacity(0.16);
+        colors.list_active_border = colors.ring;
         colors.accent = colors.secondary_hover;
         colors.accent_foreground = colors.foreground;
         colors.scrollbar = colors.background;

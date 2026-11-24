@@ -92,10 +92,12 @@ pub struct Entry {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    pub appimage_version: Option<String>,
     pub icon_override: Option<PathBuf>,
     #[serde(flatten)]
     pub target: Target,
     pub icon: Option<PathBuf>,
+    pub icon_directory: Option<PathBuf>,
     pub terminal_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub arguments: Vec<String>,
@@ -147,12 +149,32 @@ impl Draft {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct Settings {
-    pub appimage_directory: PathBuf,
-    pub browser: PathBuf,
-    #[serde(default)]
-    pub move_appimages_by_default: bool,
+    pub icons_directory: PathBuf,
+    pub image: ImageSettings,
+    pub web: WebSettings,
+    pub executable: ExecutableSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ImageSettings {
+    pub move_directory: PathBuf,
+    pub move_to_directory: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WebSettings {
+    pub browser_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ExecutableSettings {
+    pub working_directory: PathBuf,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -191,9 +213,20 @@ impl Store {
             let _lock = store.lock()?;
             if !path.try_exists()? {
                 let mut transaction = Transaction::default();
-                config::migrate(&path, &store.default_settings(), &mut transaction)?;
+                config::migrate(&path, &mut transaction)?;
                 transaction.commit();
             }
+        }
+        let needs_upgrade = config::document(&path).is_ok_and(|doc| {
+            ["appimage_directory", "move_appimages_by_default", "browser"]
+                .iter()
+                .any(|key| doc.contains_key(key))
+        });
+        if needs_upgrade {
+            let _lock = store.lock()?;
+            let mut transaction = Transaction::default();
+            config::upgrade_existing(&path, &mut transaction)?;
+            transaction.commit();
         }
         Ok(store)
     }
@@ -202,18 +235,13 @@ impl Store {
         self.config.join("config.toml")
     }
 
-    fn default_settings(&self) -> Settings {
-        Settings {
-            appimage_directory: self.home.join("Applications"),
-            browser: PathBuf::from("/usr/bin/helium"),
-            move_appimages_by_default: false,
-        }
-    }
-
     pub fn settings(&self) -> Result<Settings> {
-        let mut config = toml::Table::try_from(self.default_settings())?;
-        config.extend(config::load(&self.config_path())?);
-        Ok(Settings::deserialize(toml::Value::Table(config))?)
+        config::load(&self.config_path())?
+            .remove("apps")
+            .map(Settings::deserialize)
+            .transpose()
+            .map(|value| value.unwrap_or_default())
+            .map_err(Into::into)
     }
 
     pub fn preferences(&self) -> Result<config::Preferences> {
@@ -248,22 +276,56 @@ impl Store {
         Ok(())
     }
 
-    pub fn save_settings(&self, mut settings: Settings) -> Result<()> {
+    pub fn save_settings(
+        &self,
+        settings: Option<Settings>,
+        appearance: Option<toml::Table>,
+    ) -> Result<()> {
+        if settings.is_none() && appearance.is_none() {
+            return Ok(());
+        }
         let _lock = self.lock()?;
-        settings.appimage_directory = self.expand(&settings.appimage_directory)?;
-        settings.browser = self.expand(&settings.browser)?;
-        ensure!(
-            !settings.appimage_directory.exists() || settings.appimage_directory.is_dir(),
-            "The AppImage location must be a folder"
-        );
-        if settings.browser != self.settings()?.browser {
-            executable(&settings.browser).context("Choose an executable browser")?;
+        if let Some(settings) = &settings {
+            let old = self.settings()?;
+            for (value, previous, label) in [
+                (
+                    &settings.icons_directory,
+                    &old.icons_directory,
+                    "Icons directory",
+                ),
+                (
+                    &settings.image.move_directory,
+                    &old.image.move_directory,
+                    "AppImage directory",
+                ),
+            ] {
+                if value != previous && !value.as_os_str().is_empty() {
+                    let path = self.expand(value)?;
+                    ensure!(!path.exists() || path.is_dir(), "{label} must be a folder");
+                }
+            }
+            let working = &settings.executable.working_directory;
+            if working != &old.executable.working_directory && !working.as_os_str().is_empty() {
+                ensure!(
+                    self.expand(working)?.is_dir(),
+                    "Working directory does not exist"
+                );
+            }
+            if settings.web.browser_path != old.web.browser_path {
+                executable(&self.expand(&settings.web.browser_path)?)
+                    .context("Choose an executable browser")?;
+            }
+        }
+        if let Some(appearance) = &appearance {
+            crate::appearance::Appearance::from_table(appearance.clone())?;
         }
         self.edit_config(|document| {
-            for (key, value) in toml::Table::try_from(&settings)? {
-                document[&key] = toml_edit::Item::Value(
-                    value.serialize(toml_edit::ser::ValueSerializer::new())?,
-                );
+            if let Some(settings) = settings {
+                let values = toml::Table::try_from(&settings)?;
+                config::update_table(&mut document["apps"], &values)?;
+            }
+            if let Some(appearance) = appearance {
+                config::update_table(&mut document["appearance"], &appearance)?;
             }
             Ok(())
         })
@@ -353,6 +415,9 @@ impl Store {
             }
         }
         let mut detected_icon = None;
+        let mut appimage_version = previous
+            .as_ref()
+            .and_then(|entry| entry.appimage_version.clone());
         let mut fallback_name;
         let mut pending_move = None;
         let target = match draft.kind {
@@ -388,12 +453,13 @@ impl Store {
                         let metadata = appimage::metadata(&path);
                         fallback_name = metadata.name.unwrap_or(fallback_name);
                         detected_icon = metadata.icon;
+                        appimage_version = metadata.version;
                     }
                     let managed = previous.as_ref().is_some_and(|entry| {
                         matches!(&entry.target, Target::AppImage { path: old, managed: true } if old == &path)
                     });
                     if draft.move_appimage {
-                        let folder = self.settings()?.appimage_directory;
+                        let folder = self.expand(&self.settings()?.image.move_directory)?;
                         fs::create_dir_all(&folder)?;
                         let folder = folder.canonicalize()?;
                         let destination =
@@ -490,17 +556,25 @@ impl Store {
             .map(|path| Icon::open(path))
             .transpose()?;
         let old_icon = previous.as_ref().and_then(|entry| entry.icon.as_ref());
-        let icon = if draft.use_default_icon {
-            None
+        let (icon, icon_directory) = if draft.use_default_icon {
+            (None, None)
         } else if let Some(icon) = selected_icon.or(detected_icon) {
-            let path = self
-                .data
-                .join("icons")
-                .join(format!("{id}.{}", icon.extension));
+            let configured = self.settings()?.icons_directory;
+            let directory = if configured.as_os_str().is_empty() {
+                self.data.join("icons")
+            } else {
+                self.expand(&configured)?
+            };
+            let path = directory.join(format!("{id}.{}", icon.extension));
             transaction.write(&path, &icon.bytes, 0o644, old_icon == Some(&path))?;
-            Some(path)
+            (Some(path), Some(directory))
         } else {
-            old_icon.cloned()
+            (
+                old_icon.cloned(),
+                previous
+                    .as_ref()
+                    .and_then(|entry| entry.icon_directory.clone()),
+            )
         };
 
         if let Some(launcher) = &mut launcher {
@@ -521,9 +595,11 @@ impl Store {
             id,
             name,
             description,
+            appimage_version,
             icon_override,
             target,
             icon,
+            icon_directory,
             terminal_command,
             arguments: draft.arguments,
             working_directory,
@@ -532,8 +608,10 @@ impl Store {
 
         self.write_launcher(transaction, &entry)?;
         self.update_command(transaction, previous.as_ref(), &entry)?;
-        if let Some(old_icon) = old_icon.filter(|old| entry.icon.as_ref() != Some(*old)) {
-            self.remove_icon(transaction, &entry.id, old_icon)?;
+        if let Some(previous) = &previous
+            && previous.icon != entry.icon
+        {
+            self.remove_icon(transaction, previous)?;
         }
         if let Some((source, destination)) = pending_move {
             let mode = source.metadata()?.permissions().mode();
@@ -588,9 +666,7 @@ impl Store {
                 &command_marker(&entry.id),
             )?;
         }
-        if let Some(icon) = &entry.icon {
-            self.remove_icon(&mut transaction, &entry.id, icon)?;
-        }
+        self.remove_icon(&mut transaction, &entry)?;
         self.save_entries(&mut transaction, entries)?;
         transaction.commit();
         self.refresh_desktop_database();
@@ -687,7 +763,7 @@ impl Store {
             .with_context(|| format!("No app with ID '{id}'"))?;
         let mut command = match &entry.target {
             Target::Web { url, .. } => {
-                let browser = self.settings()?.browser;
+                let browser = self.expand(&self.settings()?.web.browser_path)?;
                 executable(&browser).context("Set an executable web app browser in Settings")?;
                 let url = parse_url(url)?;
                 let mut command = Command::new(browser);
@@ -709,9 +785,19 @@ impl Store {
                 }
             }
         };
+        let native_default =
+            if entry.working_directory.is_none() && entry.target.kind() == Kind::Native {
+                let path = self.settings()?.executable.working_directory;
+                (!path.as_os_str().is_empty())
+                    .then(|| self.expand(&path))
+                    .transpose()?
+            } else {
+                None
+            };
         if let Some(directory) = entry
             .working_directory
             .as_deref()
+            .or(native_default.as_deref())
             .or_else(|| entry.target.path().and_then(Path::parent))
         {
             command.current_dir(directory);
@@ -793,11 +879,43 @@ impl Store {
             desktop::text(icon)
         );
         if let Some(description) = app.description() {
-            content.push_str(&format!("Comment={}\n", desktop::text(description)));
+            content.push_str(&format!(
+                "Comment={}\n",
+                desktop::text(
+                    &description
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            ));
         }
         let kind = app.target.kind();
         let tag = kind.tag();
         content.push_str(&format!("Keywords={tag};\nX-TwAppManager-Type={tag}\n"));
+        if kind == Kind::AppImage {
+            let version = app.launcher.as_ref().and_then(|launcher| {
+                let path = self
+                    .data
+                    .join("gear-lever-launchers")
+                    .join(format!("{}.desktop", launcher.desktop_id));
+                fs::read_to_string(path).ok()?.lines().find_map(|line| {
+                    line.strip_prefix("X-AppImage-Version=")
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                })
+            });
+            content.push_str(&format!(
+                "X-AppImage-Version={}\n",
+                desktop::text(
+                    app.appimage_version
+                        .as_deref()
+                        .or(version.as_deref())
+                        .unwrap_or("unversioned")
+                )
+            ));
+        }
         if let Some(launcher) = &app.launcher {
             for (key, value) in [
                 (
@@ -865,11 +983,17 @@ impl Store {
         Ok(())
     }
 
-    fn remove_icon(&self, transaction: &mut Transaction, id: &str, icon: &Path) -> Result<()> {
-        let directory = self.data.join("icons");
+    fn remove_icon(&self, transaction: &mut Transaction, entry: &Entry) -> Result<()> {
+        let Some(icon) = &entry.icon else {
+            return Ok(());
+        };
+        let directory = entry
+            .icon_directory
+            .clone()
+            .unwrap_or_else(|| self.data.join("icons"));
         if ["png", "svg"]
             .into_iter()
-            .any(|ext| directory.join(format!("{id}.{ext}")) == icon)
+            .any(|ext| directory.join(format!("{}.{ext}", entry.id)) == *icon)
         {
             transaction.remove(icon)?;
         }

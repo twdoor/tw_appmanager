@@ -1,57 +1,85 @@
 # TW App Manager
 
-A Rust and GPUI desktop app for AppImages, standalone Linux x86-64 executables, and browser-based web apps. Each app gets a menu launcher and can have its own terminal command, icon, and launch settings.
+TW App Manager is a Linux desktop app, built with Rust and GPUI, for organizing AppImages, standalone x86-64 executables, and websites that open in a browser’s app mode. It creates a desktop launcher for each entry and can give each app a short command you can run from the terminal.
 
-## Build and install on Linux
+- [Install](#install)
+- [Manage apps](#manage-apps)
+- [Settings](#settings)
+- [Theme sync](#theme-sync)
+- [Command-line usage](#command-line-usage)
+- [Import from Gear Lever](#import-from-gear-lever)
+- [Files and backups](#files-and-backups)
 
-Install a recent stable Rust toolchain, a C compiler, and the GPUI Linux build dependencies. On Fedora, the relevant development packages include `libxkbcommon-devel`, `libxkbcommon-x11-devel`, `libxcb-devel`, `fontconfig-devel`, `freetype-devel`, and `wayland-devel`. Install `desktop-file-utils` for desktop database updates. The GUI uses Vulkan and the desktop portal for file pickers.
+## Install
+
+Build on Linux with a recent stable Rust toolchain, a C compiler, and the GPUI development libraries. The graphical app needs a Vulkan-capable graphics stack and a desktop portal with a file chooser backend. Install `desktop-file-utils` to update the desktop launcher database.
+
+On Fedora, the build dependencies include `libxkbcommon-devel`, `libxkbcommon-x11-devel`, `libxcb-devel`, `fontconfig-devel`, `freetype-devel`, and `wayland-devel`.
 
 ```sh
+git clone https://github.com/twdoor/tw_appmanager.git
+cd tw_appmanager
 cargo build --locked
-install -Dm755 target/debug/tw-appmanager ~/.local/bin/tw-appmanager
-~/.local/bin/tw-appmanager install-desktop
+install -Dm755 target/debug/tw-appmanager "$HOME/.local/bin/tw-appmanager"
+"$HOME/.local/bin/tw-appmanager" install-desktop
 ```
 
-Launch **TW App Manager** from the app menu, or choose it under **Open With** to import a file. TW App Manager detects AppImages and Linux x86-64 executables by inspecting the file header. To use the terminal commands assigned in the GUI, have `~/.local/bin` on your `PATH`. Re-run `install-desktop` if you move the manager executable.
+Open **TW App Manager** from your application menu. Add `~/.local/bin` to your `PATH` if your shell does not already include it. This makes both `tw-appmanager` and any per-app terminal commands available. If you move the manager binary, run `install-desktop` from the new location. Edit and save any existing app entries to regenerate launchers that reference the old binary path.
 
-## Managing apps
+## Manage apps
 
-- **AppImages** can stay in place or move into the folder in **Settings**. The manager reads Type 2 AppImage names and icons directly when available. Type 1 AppImages can be added with a manually chosen name and icon.
-- **Linux programs** are standalone x86-64 executables. Pick the executable from its existing folder, optionally provide an icon, and set launch arguments or a working directory if needed.
-- **Web apps** open in a browser that supports `--app`. Helium is the initial choice. The browser selected in **Settings** applies to every managed web app. Favicon lookup uses Google's favicon service and can be turned off in the add form.
-- **Terminal commands** are optional per app. The launcher forwards extra arguments to the app. Removing an entry removes its menu launcher and terminal command. For AppImages the manager moved, the removal screen also offers to delete the file.
+Choose **Add app**, select an app type, and choose a file or enter a URL. When your file manager offers **Open With → TW App Manager**, you can use it to review a file for import. The manager reads the file header to distinguish an AppImage from an x86-64 Linux executable. You can also use `tw-appmanager --open` to review several files in sequence.
 
-Switch between list and grid using the library toolbar. Select an item to edit its description, icon, and launch settings. Right-click it to launch it. Remove is available in the editor. Drag the sidebar divider to resize it or use the panel button to collapse it.
+| App type | Import and launch behavior |
+| --- | --- |
+| AppImage | Leave the file where it is or move it to your configured AppImages directory. The manager can detect the name and icon in Type 2 AppImages. You can also enter those values yourself. |
+| Linux program | Select an x86-64 Linux executable. You can give it an icon, set arguments, and choose its working directory. By default it starts from its own directory. |
+| Web app | Enter an HTTP or HTTPS URL. The manager opens it in the configured browser with `--app`. You can provide an icon or allow favicon lookup through Google’s favicon service. |
+
+The **Terminal command** field creates an optional command for the entry, such as `notes`. Arguments passed to it are forwarded to the app. The **Launch arguments** field sets arguments to use every time a local app starts. For a multi-word argument, use quotes, for example `--profile "Work notes"`.
+
+Use the library toolbar to search by name, description, or terminal command and switch between list and grid. Click an entry to edit it, or right-click to launch it. **Remove** in the editor deletes the entry, its menu launcher, and its terminal command. If TW App Manager moved an AppImage into its managed directory, you can also choose to delete the file.
+
+Drag the sidebar edge to change its width. Drag it inward past the labels to collapse it to icons, or use the toggle at the top.
 
 | Shortcut | Action |
 | --- | --- |
-| Ctrl+N | Add an app from the library |
-| Ctrl+F | Focus library search |
-| Ctrl+B | Toggle the sidebar |
-| Ctrl+Enter | Save an app or settings |
-| Enter | Save when the editor background has focus |
-| Escape | Go back or dismiss a notification |
+| `Ctrl+N` | Add an app from the library |
+| `Ctrl+F` | Focus library search |
+| `Ctrl+B` | Toggle the sidebar |
+| `Ctrl+Enter` | Save an app or settings |
+| `Enter` | Leave a single-line editor field, save when the page itself has focus, or confirm a font selection |
+| `Shift+Enter` | Insert a line break in the description |
+| `Escape` | Close a picker or go back from the editor or settings |
 
-## Terminal examples
+The editor stores the full multiline description. Menu launchers show it as a single-line desktop comment.
+
+## Settings
+
+Open **Settings** from the sidebar and choose **Save settings** to apply your edits. The full TOML example is in [config/config.toml](config/config.toml).
+
+| Section | What you can set |
+| --- | --- |
+| General | Destination for newly managed icons with `apps.icons_directory`. An empty path uses the manager’s data directory. |
+| AppImages | Destination and default import action with `apps.image.move_directory` and `apps.image.move_to_directory`. You can choose whether to move each AppImage during import. |
+| Web apps | Browser executable with `apps.web.browser_path`. The initial path is `/usr/bin/helium`. Choose a browser that supports `--app`. It applies to all managed web apps. |
+| Executables | Default working directory with `apps.executable.working_directory`. Leave it empty to start each program in the directory containing its executable. |
+| Appearance | Palette, font family, font size, and corner radius. Open the font field and type to filter the available families. **System font** restores the default. Changing **Corner radius** updates panels and controls together. Use `0` for square corners. |
+
+Open a palette swatch to adjust hue, saturation, lightness, and opacity. You can also type or paste `#RRGGBB` or `#RRGGBBAA`, or copy the current value using the icon inside the hex field. Choose **Use color** to stage the edit and **Save settings** to apply it.
+
+The TOML file also lets you set heading size under `[appearance.typography]`, content width and spacing under `[appearance.layout]`, and separate control and card radii under `[appearance.borders]`. Set `appearance.borders.window_width` to add an inset window outline. The app reloads appearance edits while it is open and keeps the last working appearance if an edit cannot be loaded.
+
+## Theme sync
+
+`config.toml` supports required files in `[include]` and optional files in `[include.optional]`. Relative paths resolve from the file that declares them. Included settings override the base values in order, with optional includes applied last. Missing optional files are skipped.
+
+By default, the manager looks for an optional `noctalia.toml` beside `config.toml`. To use it with Noctalia, copy the provided [template](config/noctalia.toml.in) and add this entry to Noctalia’s theme template configuration.
 
 ```sh
-tw-appmanager add appimage ./Example.AppImage --move --terminal-command example
-tw-appmanager add native /path/to/tool --name Tool --icon ./tool.png -- --profile work
-tw-appmanager list
-tw-appmanager launch example -- --help
+config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+install -Dm644 config/noctalia.toml.in "$config_home/noctalia/templates/tw-appmanager.toml"
 ```
-
-## Storage
-
-Settings and the library are stored in `config.toml` and `apps.toml` under `${XDG_CONFIG_HOME:-~/.config}/tw-appmanager`. Launchers go under `${XDG_DATA_HOME:-~/.local/share}/applications`. Managed icons and legacy launcher backups live under `${XDG_DATA_HOME:-~/.local/share}/tw-appmanager`.
-
-## Appearance and live theme sync
-
-TW App Manager reads the `[appearance]` section of `${XDG_CONFIG_HOME:-~/.config}/tw-appmanager/config.toml`. On the first run the app migrates earlier settings and appearance files and saves copies with a `.bak` suffix. Configure the palette, window and control borders, corner radii, typography, spacing, and icon sizes there. Colors accept `#RRGGBB` or `#RRGGBBAA`. Changes apply to open windows, and an invalid edit keeps the last working appearance until corrected.
-
-Like Umbriel, TW App Manager supports `[include]` and `[include.optional]` tables with a `files` array. Relative paths are resolved from the file that lists them. Includes are applied after the local values, with optional includes applied last. By default the app picks up an optional `noctalia.toml` in the same directory. A generated file can override just the palette so local typography and layout settings stay in place.
-
-For Noctalia, copy `config/noctalia.toml.in` to `${XDG_CONFIG_HOME:-~/.config}/noctalia/templates/tw-appmanager.toml` and register it in Noctalia's template configuration.
 
 ```toml
 [theme.templates.user.tw_appmanager]
@@ -59,8 +87,42 @@ input_path = "$XDG_CONFIG_HOME/noctalia/templates/tw-appmanager.toml"
 output_path = "$XDG_CONFIG_HOME/tw-appmanager/noctalia.toml"
 ```
 
-No reload hook is needed. Umbriel controls any compositor-drawn window decorations. The `appearance.borders.window_width` setting draws a border inside the app.
+The generated file supplies the palette and the manager picks up changes automatically. In **Settings → Appearance**, choose **Follow theme** to use included colors or **Local colors** to use your own palette. Selecting a color in the picker switches to **Local colors** when you save. Other settings supplied by included files still apply.
 
-## Importing from Gear Lever
+## Command-line usage
 
-Run `flatpak run it.mijorus.gearlever --list-installed` to see Gear Lever’s library. Pass the desktop IDs from `--list-installed --json` to `tw-appmanager adopt-gear-lever`. The import keeps each AppImage in place, retains its desktop ID and supported launch options, and backs up the original launchers under `${XDG_DATA_HOME:-~/.local/share}/tw-appmanager/gear-lever-launchers`.
+Run `tw-appmanager --help` for all commands or `tw-appmanager add --help` for file import options. Create web apps through **Add app** in the GUI. Use `tw-appmanager list` to find an entry’s ID for `launch` or `remove`.
+
+```sh
+tw-appmanager --open ./Example.AppImage ./tool.x86_64
+tw-appmanager add appimage ./Example.AppImage --keep-in-place --terminal-command example
+tw-appmanager add native ./tool.x86_64 --name "Example Tool" --icon ./tool.svg -- --profile work
+tw-appmanager list
+tw-appmanager launch example -- --help
+tw-appmanager remove example
+```
+
+Use `--move` to move an AppImage during import. Pass `--delete-appimage` to `remove` only when you want to delete an AppImage the manager previously moved. Arguments after `--` are saved with `add` and are supplied for that invocation only with `launch`.
+
+## Import from Gear Lever
+
+List the installed entries and find the desktop IDs you want to take over.
+
+```sh
+flatpak run it.mijorus.gearlever --list-installed --json
+tw-appmanager adopt-gear-lever example.desktop another.desktop
+```
+
+Replace the example IDs with yours. Adoption replaces the existing desktop launcher for each selected entry and preserves its desktop ID, AppImage path, and supported launch settings. Original desktop files are backed up under `tw-appmanager/gear-lever-launchers` in your XDG data directory. TW App Manager takes over the launchers. Gear Lever’s own library metadata is managed separately by Gear Lever.
+
+## Files and backups
+
+| File or directory | Purpose |
+| --- | --- |
+| `${XDG_CONFIG_HOME:-~/.config}/tw-appmanager/config.toml` | App defaults, appearance, includes, and library view preferences |
+| `${XDG_CONFIG_HOME:-~/.config}/tw-appmanager/apps.toml` | Managed app entries |
+| `${XDG_DATA_HOME:-~/.local/share}/applications/` | Generated desktop launchers and the manager’s Open With entry |
+| `${XDG_DATA_HOME:-~/.local/share}/tw-appmanager/` | Managed icons and Gear Lever launcher backups |
+| `~/.local/bin/` | Manager executable and optional terminal launchers |
+
+Back up the config and app catalog along with any moved AppImages and managed icons you want to keep. If you upgrade from a version with `settings.toml` and `appearance.toml`, the manager migrates them to `config.toml` on the first run and saves the old files with a `.bak` suffix.

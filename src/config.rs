@@ -38,21 +38,19 @@ struct OptionalIncludes {
     files: Vec<String>,
 }
 
-pub fn migrate(
-    path: &Path,
-    defaults: &impl Serialize,
-    transaction: &mut Transaction,
-) -> Result<()> {
+pub fn migrate(path: &Path, transaction: &mut Transaction) -> Result<()> {
     let directory = path.parent().context("Missing config directory")?;
     let legacy_settings = directory.join("settings.toml");
     let legacy_appearance = directory.join("appearance.toml");
-    let mut root = Table::try_from(defaults)?;
+    let mut document: toml_edit::DocumentMut = DEFAULT_CONFIG.parse()?;
     let settings = read(&legacy_settings, true)?;
     if let Some(text) = &settings {
-        merge(&mut root, parse(&legacy_settings, text)?);
+        let mut settings = parse(&legacy_settings, text)?;
+        upgrade_apps(&mut settings)?;
+        if let Some(apps) = settings.get("apps").and_then(Value::as_table) {
+            document["apps"] = table_item(apps)?;
+        }
     }
-    let mut document: toml_edit::DocumentMut =
-        format!("{}\n{DEFAULT_CONFIG}", toml::to_string(&root)?).parse()?;
     let appearance = read(&legacy_appearance, true)?;
     if let Some(text) = &appearance {
         let mut old = parse(&legacy_appearance, text)?;
@@ -82,7 +80,7 @@ pub fn migrate(
     Ok(())
 }
 
-fn table_item(values: &Table) -> Result<toml_edit::Item> {
+pub fn table_item(values: &Table) -> Result<toml_edit::Item> {
     let mut table = toml_edit::Table::new();
     for (key, value) in values {
         let item = match value {
@@ -95,10 +93,103 @@ fn table_item(values: &Table) -> Result<toml_edit::Item> {
     Ok(toml_edit::Item::Table(table))
 }
 
+pub fn update_table(item: &mut toml_edit::Item, values: &Table) -> Result<()> {
+    if item.is_none() {
+        *item = table_item(values)?;
+        return Ok(());
+    }
+    for (key, value) in values {
+        match value {
+            Value::Table(children) => update_table(&mut item[key], children)?,
+            _ => {
+                let mut edited = value.serialize(toml_edit::ser::ValueSerializer::new())?;
+                if let Some(current) = item.get(key).and_then(toml_edit::Item::as_value) {
+                    *edited.decor_mut() = current.decor().clone();
+                }
+                item[key] = toml_edit::Item::Value(edited);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn upgrade_existing(path: &Path, transaction: &mut Transaction) -> Result<()> {
+    let mut doc = document(path)?;
+    let mut settings = parse(path, &doc.to_string())?;
+    if !upgrade_apps(&mut settings)? {
+        return Ok(());
+    }
+    for (old, _, _) in LEGACY_KEYS {
+        doc.remove(old);
+    }
+    doc["apps"] = table_item(
+        settings["apps"]
+            .as_table()
+            .context("Invalid apps settings")?,
+    )?;
+    transaction.write(path, doc.to_string().as_bytes(), 0o600, true)
+}
+
+const LEGACY_KEYS: [(&str, &str, &str); 3] = [
+    ("appimage_directory", "image", "move_directory"),
+    ("move_appimages_by_default", "image", "move_to_directory"),
+    ("browser", "web", "browser_path"),
+];
+
+fn upgrade_apps(root: &mut Table) -> Result<bool> {
+    let mut changed = false;
+    for (old, section, key) in LEGACY_KEYS {
+        let Some(value) = root.remove(old) else {
+            continue;
+        };
+        changed = true;
+        let apps = root
+            .entry("apps")
+            .or_insert_with(|| Value::Table(Table::new()))
+            .as_table_mut()
+            .context("Expected an apps table")?;
+        let target = apps
+            .entry(section)
+            .or_insert_with(|| Value::Table(Table::new()))
+            .as_table_mut()
+            .context("Expected an app type table")?;
+        target.entry(key).or_insert(value);
+    }
+    if changed {
+        let mut defaults: Table = toml::from_str(DEFAULT_CONFIG)?;
+        let mut apps = defaults
+            .remove("apps")
+            .and_then(|value| value.as_table().cloned())
+            .context("Missing app defaults")?;
+        let configured = root
+            .remove("apps")
+            .and_then(|value| value.as_table().cloned())
+            .context("Expected an apps table")?;
+        merge(&mut apps, configured);
+        root.insert("apps".into(), Value::Table(apps));
+    }
+    Ok(changed)
+}
+
+pub fn local_appearance(path: &Path) -> Result<Table> {
+    let mut defaults = parse(path, DEFAULT_CONFIG)?;
+    merge(&mut defaults, parse(path, &fs::read_to_string(path)?)?);
+    match defaults.remove("appearance") {
+        Some(Value::Table(appearance)) => Ok(appearance),
+        _ => anyhow::bail!("Expected an appearance table"),
+    }
+}
+
 pub fn load(path: &Path) -> Result<Table> {
     let mut merged = parse(path, DEFAULT_CONFIG)?;
     let root = read(path, false)?.context("Missing config")?;
-    merge_file(&mut merged, path, &root, 0)?;
+    let document = parse(path, &root)?;
+    let included_colors = document
+        .get("appearance")
+        .and_then(|appearance| appearance.get("use_included_colors"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    merge_file(&mut merged, path, document, 0, included_colors)?;
     Ok(merged)
 }
 
@@ -120,13 +211,18 @@ fn parse(path: &Path, text: &str) -> Result<Table> {
     toml::from_str(text).with_context(|| format!("Could not parse {}", path.display()))
 }
 
-fn merge_file(merged: &mut Table, path: &Path, text: &str, depth: usize) -> Result<()> {
+fn merge_file(
+    merged: &mut Table,
+    path: &Path,
+    mut layer: Table,
+    depth: usize,
+    included_colors: bool,
+) -> Result<()> {
     ensure!(
         depth < 16,
         "Config includes are nested too deeply at {}",
         path.display()
     );
-    let mut layer = parse(path, text)?;
     let includes = layer
         .remove("include")
         .map(Includes::deserialize)
@@ -147,6 +243,14 @@ fn merge_file(merged: &mut Table, path: &Path, text: &str, depth: usize) -> Resu
             layer.insert("appearance".into(), Value::Table(appearance));
         }
     }
+    if depth > 0
+        && let Some(appearance) = layer.get_mut("appearance").and_then(Value::as_table_mut)
+    {
+        appearance.remove("use_included_colors");
+        if !included_colors {
+            appearance.remove("colors");
+        }
+    }
     merge(merged, layer);
     let parent = path
         .parent()
@@ -155,7 +259,13 @@ fn merge_file(merged: &mut Table, path: &Path, text: &str, depth: usize) -> Resu
         for file in files {
             let included = parent.join(file);
             if let Some(text) = read(&included, optional)? {
-                merge_file(merged, &included, &text, depth + 1)?;
+                merge_file(
+                    merged,
+                    &included,
+                    parse(&included, &text)?,
+                    depth + 1,
+                    included_colors,
+                )?;
             }
         }
     }
@@ -170,5 +280,102 @@ fn merge(base: &mut Table, layer: Table) {
                 base.insert(key, value);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moves_flat_settings_without_overwriting_explicit_sections() -> Result<()> {
+        let mut config: Table = toml::from_str(
+            r#"
+appimage_directory = "/old"
+move_appimages_by_default = true
+browser = "/usr/bin/browser"
+
+[apps.image]
+move_directory = "/new"
+
+[extensions]
+enabled = true
+"#,
+        )?;
+        assert!(upgrade_apps(&mut config)?);
+        assert_eq!(
+            config["apps"]["image"]["move_directory"].as_str(),
+            Some("/new")
+        );
+        assert_eq!(
+            config["apps"]["image"]["move_to_directory"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            config["apps"]["web"]["browser_path"].as_str(),
+            Some("/usr/bin/browser")
+        );
+        assert_eq!(config["apps"]["icons_directory"].as_str(), Some(""));
+        assert!(config.contains_key("extensions"));
+        assert!(!upgrade_apps(&mut config)?);
+        Ok(())
+    }
+
+    #[test]
+    fn settings_edits_preserve_other_entries_and_comments() -> Result<()> {
+        let mut document: toml_edit::DocumentMut = r#"[apps]
+icons_directory = "" # Custom icons
+plugin = true
+"#
+        .parse()?;
+        let values: Table = toml::from_str(
+            r#"icons_directory = "~/Icons"
+[image]
+move_to_directory = true"#,
+        )?;
+        update_table(&mut document["apps"], &values)?;
+        let saved = document.to_string();
+        let parsed: Table = toml::from_str(&saved)?;
+        assert!(saved.contains("# Custom icons"));
+        assert_eq!(parsed["apps"]["plugin"].as_bool(), Some(true));
+        assert_eq!(
+            parsed["apps"]["image"]["move_to_directory"].as_bool(),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_palette_retains_other_included_settings() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[include]
+files = ["theme.toml"]
+[appearance]
+use_included_colors = false
+"#,
+        )?;
+        fs::write(
+            temp.path().join("theme.toml"),
+            r##"
+[appearance.colors]
+background = "#123456"
+[appearance.layout]
+spacing = 9.0
+"##,
+        )?;
+        let loaded = load(&path)?;
+        assert_eq!(
+            loaded["appearance"]["colors"]["background"].as_str(),
+            Some("#17191e")
+        );
+        assert_eq!(
+            loaded["appearance"]["layout"]["spacing"].as_float(),
+            Some(9.)
+        );
+        Ok(())
     }
 }
