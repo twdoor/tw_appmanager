@@ -1,6 +1,5 @@
 use std::{
     env,
-    ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, ErrorKind},
     os::unix::{fs::PermissionsExt, process::CommandExt},
@@ -13,7 +12,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use url::Url;
 
 use crate::{
-    appimage, desktop,
+    appimage, config, desktop,
     icons::{self, Icon},
     transaction::Transaction,
 };
@@ -24,11 +23,20 @@ pub enum Kind {
     #[value(name = "appimage", alias = "app-image")]
     AppImage,
     Native,
+    #[value(skip)]
     Web,
 }
 
 impl Kind {
     pub const ALL: [Self; 3] = [Self::AppImage, Self::Native, Self::Web];
+
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::AppImage => "appimage",
+            Self::Native => "executable",
+            Self::Web => "web",
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -52,8 +60,6 @@ pub enum Target {
     },
     Web {
         url: String,
-        #[serde(default)]
-        legacy_source: Option<String>,
     },
 }
 
@@ -85,6 +91,8 @@ impl Target {
 pub struct Entry {
     pub id: String,
     pub name: String,
+    pub description: Option<String>,
+    pub icon_override: Option<PathBuf>,
     #[serde(flatten)]
     pub target: Target,
     pub icon: Option<PathBuf>,
@@ -96,11 +104,20 @@ pub struct Entry {
     pub launcher: Option<desktop::AdoptedLauncher>,
 }
 
+impl Entry {
+    pub fn description(&self) -> Option<&str> {
+        self.description
+            .as_deref()
+            .or_else(|| self.launcher.as_ref()?.comment.as_deref())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Draft {
     pub id: Option<String>,
     pub kind: Kind,
     pub name: String,
+    pub description: String,
     pub source: String,
     pub icon: Option<PathBuf>,
     pub terminal_command: Option<String>,
@@ -117,6 +134,7 @@ impl Draft {
             id: None,
             kind,
             name: String::new(),
+            description: String::new(),
             source,
             icon: None,
             terminal_command: None,
@@ -160,28 +178,74 @@ impl Store {
             .context("HOME is required")?;
         let config = xdg("XDG_CONFIG_HOME", home.join(".config"));
         let data = xdg("XDG_DATA_HOME", home.join(".local/share"));
-        Ok(Self {
+        let store = Self {
             bin: home.join(".local/bin"),
             home,
             config: config.join("tw-appmanager"),
             data: data.join("tw-appmanager"),
             applications: data.join("applications"),
             executable: env::current_exe()?,
-        })
+        };
+        let path = store.config_path();
+        if !path.try_exists()? {
+            let _lock = store.lock()?;
+            if !path.try_exists()? {
+                let mut transaction = Transaction::default();
+                config::migrate(&path, &store.default_settings(), &mut transaction)?;
+                transaction.commit();
+            }
+        }
+        Ok(store)
     }
 
-    pub fn appearance_path(&self) -> PathBuf {
-        self.config.join("appearance.toml")
+    pub fn config_path(&self) -> PathBuf {
+        self.config.join("config.toml")
+    }
+
+    fn default_settings(&self) -> Settings {
+        Settings {
+            appimage_directory: self.home.join("Applications"),
+            browser: PathBuf::from("/usr/bin/helium"),
+            move_appimages_by_default: false,
+        }
     }
 
     pub fn settings(&self) -> Result<Settings> {
-        Ok(
-            read_toml(&self.config.join("settings.toml"))?.unwrap_or_else(|| Settings {
-                appimage_directory: self.home.join("Applications"),
-                browser: PathBuf::from("/usr/bin/helium"),
-                move_appimages_by_default: false,
-            }),
-        )
+        let mut config = toml::Table::try_from(self.default_settings())?;
+        config.extend(config::load(&self.config_path())?);
+        Ok(Settings::deserialize(toml::Value::Table(config))?)
+    }
+
+    pub fn preferences(&self) -> Result<config::Preferences> {
+        config::load(&self.config_path())?
+            .remove("ui")
+            .map(config::Preferences::deserialize)
+            .transpose()
+            .map(|value| value.unwrap_or_default())
+            .map_err(Into::into)
+    }
+
+    pub fn save_preferences(&self, preferences: &config::Preferences) -> Result<()> {
+        let _lock = self.lock()?;
+        self.edit_config(|document| {
+            for (key, value) in toml_edit::ser::to_document(preferences)?.into_table() {
+                document["ui"][&key] = value;
+            }
+            Ok(())
+        })
+    }
+
+    fn edit_config(
+        &self,
+        edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>,
+    ) -> Result<()> {
+        let path = self.config_path();
+        let mut document = config::document(&path)?;
+        edit(&mut document)?;
+        let mut transaction = Transaction::default();
+        transaction.write(&path, document.to_string().as_bytes(), 0o600, true)?;
+        transaction.commit();
+        Ok(())
     }
 
     pub fn save_settings(&self, mut settings: Settings) -> Result<()> {
@@ -195,14 +259,14 @@ impl Store {
         if settings.browser != self.settings()?.browser {
             executable(&settings.browser).context("Choose an executable browser")?;
         }
-        let mut transaction = Transaction::default();
-        write_toml(
-            &mut transaction,
-            &self.config.join("settings.toml"),
-            &settings,
-        )?;
-        transaction.commit();
-        Ok(())
+        self.edit_config(|document| {
+            for (key, value) in toml::Table::try_from(&settings)? {
+                document[&key] = toml_edit::Item::Value(
+                    value.serialize(toml_edit::ser::ValueSerializer::new())?,
+                );
+            }
+            Ok(())
+        })
     }
 
     pub fn entries(&self) -> Result<Vec<Entry>> {
@@ -271,7 +335,7 @@ impl Store {
                 "App type cannot be changed"
             );
         }
-        let launcher =
+        let mut launcher =
             adopted.or_else(|| previous.as_ref().and_then(|entry| entry.launcher.clone()));
         if launcher
             .as_ref()
@@ -369,14 +433,7 @@ impl Store {
                 {
                     detected_icon = icons::favicon(&url);
                 }
-                let legacy_source = previous.as_ref().and_then(|entry| match &entry.target {
-                    Target::Web { legacy_source, .. } => legacy_source.clone(),
-                    _ => None,
-                });
-                Target::Web {
-                    url: url.into(),
-                    legacy_source,
-                }
+                Target::Web { url: url.into() }
             }
         };
 
@@ -416,9 +473,21 @@ impl Store {
             ensure!(path.is_dir(), "Working directory does not exist");
         }
 
-        let selected_icon = draft
+        let supplied_icon = draft
             .icon
-            .map(|path| Icon::open(&self.expand(&path)?))
+            .as_deref()
+            .map(|path| self.expand(path))
+            .transpose()?;
+        let selected_icon = supplied_icon
+            .as_ref()
+            .filter(|_| !draft.use_default_icon)
+            .filter(|path| {
+                previous
+                    .as_ref()
+                    .and_then(|entry| entry.icon_override.as_ref())
+                    != Some(path)
+            })
+            .map(|path| Icon::open(path))
             .transpose()?;
         let old_icon = previous.as_ref().and_then(|entry| entry.icon.as_ref());
         let icon = if draft.use_default_icon {
@@ -434,9 +503,25 @@ impl Store {
             old_icon.cloned()
         };
 
+        if let Some(launcher) = &mut launcher {
+            launcher.comment = None;
+        }
+        let description =
+            (!draft.description.trim().is_empty()).then(|| draft.description.trim().to_owned());
+        let icon_override = if draft.use_default_icon {
+            None
+        } else {
+            supplied_icon.or_else(|| {
+                previous
+                    .as_ref()
+                    .and_then(|entry| entry.icon_override.clone())
+            })
+        };
         let entry = Entry {
             id,
             name,
+            description,
+            icon_override,
             target,
             icon,
             terminal_command,
@@ -529,22 +614,6 @@ impl Store {
             self.write_launcher(&mut transaction, &entry)?;
             self.update_command(&mut transaction, Some(&entry), &entry)?;
         }
-        if !self.config.join("settings.toml").try_exists()? {
-            write_toml(
-                &mut transaction,
-                &self.config.join("settings.toml"),
-                &self.settings()?,
-            )?;
-        }
-        let appearance = self.appearance_path();
-        if !appearance.try_exists()? {
-            transaction.write(
-                &appearance,
-                crate::appearance::DEFAULT_CONFIG.as_bytes(),
-                0o644,
-                false,
-            )?;
-        }
         transaction.commit();
         self.refresh_desktop_database();
         desktop::restore_appimage_defaults(defaults);
@@ -587,6 +656,7 @@ impl Store {
                     .to_owned(),
             );
             draft.name = old.name;
+            draft.description = old.launcher.comment.clone().unwrap_or_default();
             draft.icon = old.icon;
             draft.arguments = old.arguments;
             draft.working_directory = old.working_directory;
@@ -601,88 +671,6 @@ impl Store {
         transaction.commit();
         self.refresh_desktop_database();
         Ok(adopted)
-    }
-
-    pub fn import_legacy_webapps(&self) -> Result<usize> {
-        let _lock = self.lock()?;
-        let mut entries = self.entries()?;
-        let mut transaction = Transaction::default();
-        // The old CLI uses fixed paths even when XDG_DATA_HOME is set.
-        let legacy = self.home.join(".local/share");
-        let files = match fs::read_dir(legacy.join("webapps")) {
-            Ok(files) => files,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
-            Err(error) => return Err(error.into()),
-        };
-        let mut count = 0;
-        for file in files {
-            let file = file?;
-            let path = file.path();
-            if path.extension() != Some(OsStr::new("conf")) || !file.file_type()?.is_file() {
-                continue;
-            }
-            let source = path
-                .file_stem()
-                .and_then(OsStr::to_str)
-                .context("Invalid legacy web app filename")?;
-            if entries.iter().any(|entry| matches!(&entry.target, Target::Web { legacy_source: Some(old), .. } if old == source)) {
-                continue;
-            }
-            let config = fs::read_to_string(&path)?;
-            let name = config
-                .lines()
-                .find_map(|line| line.strip_prefix("NAME="))
-                .unwrap_or(source);
-            let url = config
-                .lines()
-                .find_map(|line| line.strip_prefix("URL="))
-                .with_context(|| format!("Missing URL in {}", path.display()))?;
-            let mut draft = Draft::new(Kind::Web, url.to_owned());
-            draft.name = name.to_owned();
-            draft.fetch_favicon = false;
-            let icon = legacy.join("icons/webapps").join(format!("{source}.png"));
-            if icon.is_file() && Icon::open(&icon).is_ok() {
-                draft.icon = Some(icon);
-            }
-            let entry = self.apply_draft(&mut entries, draft, None, &mut transaction)?;
-            let imported = entries
-                .iter_mut()
-                .find(|app| app.id == entry.id)
-                .context("Imported entry was lost")?;
-            if let Target::Web { legacy_source, .. } = &mut imported.target {
-                *legacy_source = Some(source.to_owned());
-            }
-
-            // Retire matching legacy launchers to avoid duplicate menu entries.
-            let old_launcher = legacy
-                .join("applications")
-                .join(format!("{source}.desktop"));
-            if let Ok(text) = fs::read_to_string(&old_launcher)
-                && text
-                    .lines()
-                    .any(|line| line.strip_prefix("Name=") == Some(name))
-                && text
-                    .lines()
-                    .any(|line| line.strip_prefix("Comment=Webapp: ") == Some(url))
-                && text
-                    .lines()
-                    .any(|line| line.starts_with("Exec=") && line.contains(" --app="))
-            {
-                let backup = self
-                    .data
-                    .join("legacy-launchers")
-                    .join(format!("{source}.desktop"));
-                transaction.write(&backup, text.as_bytes(), 0o644, false)?;
-                transaction.remove(&old_launcher)?;
-            }
-            count += 1;
-        }
-        if count > 0 {
-            self.save_entries(&mut transaction, entries)?;
-            transaction.commit();
-            self.refresh_desktop_database();
-        }
-        Ok(count)
     }
 
     pub fn launch(
@@ -804,9 +792,14 @@ impl Store {
             desktop::text(&app.name),
             desktop::text(icon)
         );
+        if let Some(description) = app.description() {
+            content.push_str(&format!("Comment={}\n", desktop::text(description)));
+        }
+        let kind = app.target.kind();
+        let tag = kind.tag();
+        content.push_str(&format!("Keywords={tag};\nX-TwAppManager-Type={tag}\n"));
         if let Some(launcher) = &app.launcher {
             for (key, value) in [
-                ("Comment", launcher.comment.as_deref()),
                 (
                     "Categories",
                     launcher.categories.as_deref().or(Some(category)),

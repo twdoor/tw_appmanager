@@ -1,4 +1,4 @@
-[colors]
+[appearance.colors]
 background = "#{{colors.surface.default.hex_stripped}}"
 sidebar = "#{{colors.surface_container.default.hex_stripped}}"
 surface = "#{{colors.surface_container_high.default.hex_stripped}}"
@@ -11,7 +11,7 @@ accent_text = "#{{colors.on_primary.default.hex_stripped}}"
 error = "#{{colors.error.default.hex_stripped}}"
 error_text = "#{{colors.on_error.default.hex_stripped}}"
 
-[colors.border]
+[appearance.colors.border]
 focused = "#{{colors.primary.default.hex_stripped}}"
 unfocused = "#{{colors.outline_variant.default.hex_stripped}}"
 outer = "#{{colors.outline.default.hex_stripped}}"

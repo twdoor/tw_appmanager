@@ -1,63 +1,73 @@
-use std::{cell::RefCell, collections::VecDeque, path::PathBuf, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    path::PathBuf,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result};
 use gpui::{
     App, AppContext, Application, Bounds, Context, Entity, ImageSource, IntoElement,
     PathPromptOptions, Render, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    div, img, prelude::*, px, size,
+    div, prelude::*, px, relative, size,
 };
 use gpui_component::{
-    Disableable, Root, Theme,
-    button::{Button, ButtonVariants},
+    Root, Theme,
     input::{Input, InputState},
+    menu::{ContextMenuExt, PopupMenuItem},
 };
 
 use crate::{
     appearance::Appearance,
     appimage::detect_executable,
+    config::{Preferences, View},
     desktop::ID,
     library::{Draft, Entry, Kind, Settings, Store, Target},
+    widgets::{Control, Glyphs, app_icon, glyph},
 };
 
 pub fn run(store: Store, paths: Vec<PathBuf>) -> Result<()> {
     let startup_error = Rc::new(RefCell::new(None));
     let window_error = startup_error.clone();
-    Application::new().run(move |cx: &mut App| {
-        gpui_component::init(cx);
-        let bounds = Bounds::centered(None, size(px(1020.), px(700.)), cx);
-        let window = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(660.), px(480.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("TW App Manager".into()),
-                    ..TitlebarOptions::default()
-                }),
-                app_id: Some(ID.into()),
-                ..WindowOptions::default()
-            },
-            |window, cx| {
-                window.set_window_title("TW App Manager");
-                let view = cx.new(|cx| Manager::new(store, paths.into(), window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        );
-        match window {
-            Ok(_) => {
-                cx.on_window_closed(|cx| {
-                    if cx.windows().is_empty() {
-                        cx.quit();
-                    }
-                })
-                .detach();
-                cx.activate(true);
+    Application::new()
+        .with_assets(Glyphs)
+        .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            let bounds = Bounds::centered(None, size(px(1020.), px(700.)), cx);
+            let window = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(660.), px(480.))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("TW App Manager".into()),
+                        ..TitlebarOptions::default()
+                    }),
+                    app_id: Some(ID.into()),
+                    ..WindowOptions::default()
+                },
+                |window, cx| {
+                    window.set_window_title("TW App Manager");
+                    let view = cx.new(|cx| Manager::new(store, paths.into(), window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                },
+            );
+            match window {
+                Ok(_) => {
+                    cx.on_window_closed(|cx| {
+                        if cx.windows().is_empty() {
+                            cx.quit();
+                        }
+                    })
+                    .detach();
+                    cx.activate(true);
+                }
+                Err(error) => {
+                    *window_error.borrow_mut() = Some(error);
+                    cx.quit();
+                }
             }
-            Err(error) => {
-                *window_error.borrow_mut() = Some(error);
-                cx.quit();
-            }
-        }
-    });
+        });
     if let Some(error) = startup_error.borrow_mut().take() {
         return Err(error);
     }
@@ -66,9 +76,9 @@ pub fn run(store: Store, paths: Vec<PathBuf>) -> Result<()> {
 
 enum Page {
     Library,
-    Edit(Form),
+    Edit(Box<Form>),
     Settings(SettingsForm),
-    Remove(Entry),
+    Remove(Box<Form>),
 }
 
 struct Manager {
@@ -78,7 +88,10 @@ struct Manager {
     filter: Option<Kind>,
     search: Entity<InputState>,
     queue: VecDeque<PathBuf>,
-    status: Option<(String, bool)>,
+    toast: Option<Toast>,
+    preferences: Preferences,
+    sidebar_drag: Option<(gpui::Pixels, f32)>,
+    focus: gpui::FocusHandle,
     busy: bool,
     appearance: Appearance,
     appearance_error: Option<String>,
@@ -93,7 +106,7 @@ impl Manager {
     ) -> Self {
         let search = text_input("", "Search apps", window, cx);
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
-        let path = store.appearance_path();
+        let path = store.config_path();
         let system_font = Theme::global(cx).font_family.clone();
         let (appearance, appearance_error) = match Appearance::load(&path) {
             Ok(appearance) => (appearance, None),
@@ -123,6 +136,8 @@ impl Manager {
                         Err(error) => {
                             let message = format!("{error:#}");
                             if this.appearance_error.as_ref() != Some(&message) {
+                                this.toast =
+                                    Some(Toast::new(format!("Appearance: {message}"), true));
                                 this.appearance_error = Some(message);
                                 cx.notify();
                             }
@@ -135,6 +150,54 @@ impl Manager {
             }
         })
         .detach();
+        let preferences = store.preferences().unwrap_or_default();
+        let clock = cx.background_executor().clone();
+        cx.spawn_in(window, async move |view, cx| {
+            let mut interval = Duration::from_millis(180);
+            loop {
+                clock.timer(interval).await;
+                let Ok(active) = view.update_in(cx, |this, _, cx| {
+                    let Some(toast) = &mut this.toast else {
+                        return false;
+                    };
+                    if toast.paused {
+                        return false;
+                    }
+                    let now = Instant::now();
+                    toast.remaining = toast.remaining.saturating_sub(now - toast.updated);
+                    toast.updated = now;
+                    if toast.remaining.is_zero() {
+                        this.toast = None;
+                    }
+                    cx.notify();
+                    this.toast.is_some()
+                }) else {
+                    break;
+                };
+                interval = Duration::from_millis(if active { 45 } else { 180 });
+            }
+        })
+        .detach();
+        let view = cx.weak_entity();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            let key = &event.keystroke;
+            let mods = key.modifiers;
+            let shortcut = mods.control
+                && !mods.alt
+                && !mods.shift
+                && !mods.platform
+                && matches!(key.key.as_str(), "b" | "f" | "n" | "enter");
+            let escape = !mods.modified()
+                && key.key == "escape"
+                && !event
+                    .context_stack
+                    .iter()
+                    .any(|context| context.contains("PopupMenu"));
+            if shortcut || escape {
+                let _ = view.update(cx, |this, cx| this.shortcut(&key.key, window, cx));
+            }
+        })
+        .detach();
         let mut this = Self {
             store,
             apps: Vec::new(),
@@ -142,7 +205,12 @@ impl Manager {
             filter: None,
             search,
             queue,
-            status: None,
+            toast: appearance_error
+                .as_ref()
+                .map(|error| Toast::new(format!("Appearance: {error}"), true)),
+            preferences,
+            sidebar_drag: None,
+            focus: cx.focus_handle(),
             busy: false,
             appearance,
             appearance_error,
@@ -150,6 +218,7 @@ impl Manager {
         cx.observe_window_activation(window, |_, _, cx| cx.notify())
             .detach();
         this.reload();
+        this.focus.focus(window);
         this.next_import(window, cx);
         this
     }
@@ -162,7 +231,7 @@ impl Manager {
     }
 
     fn error(&mut self, error: anyhow::Error) {
-        self.status = Some((format!("{error:#}"), true));
+        self.toast = Some(Toast::new(format!("{error:#}"), true));
     }
 
     fn next_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -177,7 +246,8 @@ impl Manager {
                 });
             match result {
                 Ok((kind, source)) => {
-                    self.page = Page::Edit(self.new_form(kind, source.to_owned(), window, cx));
+                    self.page =
+                        Page::Edit(Box::new(self.new_form(kind, source.to_owned(), window, cx)));
                     return;
                 }
                 Err(error) => self.error(error),
@@ -201,6 +271,7 @@ impl Manager {
             }
         }
         let form = Form::new(draft, window, cx);
+        cx.observe(&form.icon, |_, _, cx| cx.notify()).detach();
         let initial = if form.from_file_manager {
             &form.name
         } else {
@@ -213,25 +284,22 @@ impl Manager {
     fn show_library(&mut self, filter: Option<Kind>, cx: &mut Context<Self>) {
         self.filter = filter;
         self.page = Page::Library;
-        self.status = None;
         self.queue.clear();
         self.reload();
         cx.notify();
     }
 
-    fn add(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.status = None;
-        self.page = Page::Edit(self.new_form(
+    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.page = Page::Edit(Box::new(self.new_form(
             self.filter.unwrap_or(Kind::AppImage),
             String::new(),
             window,
             cx,
-        ));
+        )));
         cx.notify();
     }
 
     fn show_settings(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.status = None;
         match self.store.settings() {
             Ok(settings) => self.page = Page::Settings(SettingsForm::new(settings, window, cx)),
             Err(error) => self.error(error),
@@ -240,18 +308,23 @@ impl Manager {
     }
 
     fn edit(&mut self, entry: &Entry, window: &mut Window, cx: &mut Context<Self>) {
-        self.status = None;
         let mut draft = Draft::new(entry.target.kind(), entry.target.display());
         draft.id = Some(entry.id.clone());
         draft.name = entry.name.clone();
+        draft.description = entry.description().unwrap_or_default().to_owned();
+        draft.icon = entry.icon_override.clone();
         draft.terminal_command = entry.terminal_command.clone();
         draft.arguments = entry.arguments.clone();
         draft.working_directory = entry.working_directory.clone();
-        self.page = Page::Edit(Form::new(draft, window, cx));
+        let mut form = Form::new(draft, window, cx);
+        form.entry = Some(entry.clone());
+        cx.observe(&form.icon, |_, _, cx| cx.notify()).detach();
+        self.focus.focus(window);
+        self.page = Page::Edit(Box::new(form));
         cx.notify();
     }
 
-    fn save(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Page::Edit(form) = &self.page else { return };
         let draft = match form.read(cx) {
             Ok(draft) => draft,
@@ -270,7 +343,7 @@ impl Manager {
                 if let Some(icon) = app.icon {
                     ImageSource::from(icon).remove_asset(cx);
                 }
-                this.status = Some((format!("Saved {}", app.name), false));
+                this.toast = Some(Toast::new(format!("Saved {}", app.name), false));
                 this.reload();
                 this.filter = None;
                 this.search
@@ -280,7 +353,7 @@ impl Manager {
         );
     }
 
-    fn save_settings(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn save_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Page::Settings(form) = &self.page else {
             return;
         };
@@ -295,33 +368,16 @@ impl Manager {
             cx,
             move || store.save_settings(settings),
             |this, (), _, _| {
-                this.status = Some(("Settings saved".into(), false));
-            },
-        );
-    }
-
-    fn import_legacy(&mut self, _: &gpui::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let store = self.store.clone();
-        self.perform(
-            window,
-            cx,
-            move || store.import_legacy_webapps(),
-            |this, count, _, _| {
-                let message = match count {
-                    0 => "No new web apps to import".into(),
-                    1 => "Imported 1 web app".into(),
-                    _ => format!("Imported {count} web apps"),
-                };
-                this.status = Some((message, false));
-                this.reload();
+                this.toast = Some(Toast::new("Settings saved".into(), false));
             },
         );
     }
 
     fn remove(&mut self, delete_file: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Page::Remove(entry) = &self.page else {
+        let Page::Remove(form) = &self.page else {
             return;
         };
+        let Some(entry) = &form.entry else { return };
         let id = entry.id.clone();
         let store = self.store.clone();
         self.perform(
@@ -329,7 +385,7 @@ impl Manager {
             cx,
             move || store.remove(&id, delete_file),
             |this, name, _, _| {
-                this.status = Some((format!("Removed {name}"), false));
+                this.toast = Some(Toast::new(format!("Removed {name}"), false));
                 this.reload();
                 this.page = Page::Library;
             },
@@ -344,7 +400,6 @@ impl Manager {
         success: impl FnOnce(&mut Self, T, &mut Window, &mut Context<Self>) + 'static,
     ) {
         self.busy = true;
-        self.status = None;
         let task = cx.background_spawn(async move { work() });
         cx.spawn_in(window, async move |view, cx| {
             let result = task.await;
@@ -430,8 +485,8 @@ impl Manager {
         input
     }
 
-    fn button(&self, id: impl Into<gpui::ElementId>) -> Button {
-        let mut button = Button::new(id);
+    fn button(&self, id: impl Into<gpui::ElementId>) -> Control {
+        let mut button = Control::new(id);
         button.style().border_widths = border_widths(self.appearance.borders.width);
         button
     }
@@ -450,21 +505,42 @@ impl Manager {
         element
     }
 
+    fn persist_preferences(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = self.store.save_preferences(&self.preferences) {
+            self.error(error);
+        }
+        cx.notify();
+    }
+
+    fn sidebar_width(&self) -> f32 {
+        self.preferences
+            .sidebar_width
+            .unwrap_or(self.appearance.layout.sidebar_width)
+            .clamp(150., 320.)
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.preferences.sidebar_collapsed = !self.preferences.sidebar_collapsed;
+        self.persist_preferences(cx);
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let collapsed = self.preferences.sidebar_collapsed;
         let filters = [
-            (None, "All apps"),
-            (Some(Kind::AppImage), "AppImages"),
-            (Some(Kind::Native), "Linux programs"),
-            (Some(Kind::Web), "Web apps"),
+            (None, "All apps", "library"),
+            (Some(Kind::AppImage), "AppImages", "package"),
+            (Some(Kind::Native), "Executables", "terminal"),
+            (Some(Kind::Web), "Web apps", "web"),
         ];
         div()
+            .relative()
             .flex()
             .flex_col()
-            .w(px(self.appearance.layout.sidebar_width))
             .flex_none()
             .h_full()
-            .p_4()
-            .gap(px(self.appearance.layout.spacing * 3.))
+            .w(px(if collapsed { 60. } else { self.sidebar_width() }))
+            .p_3()
+            .gap_3()
             .bg(self.appearance.colors.sidebar.hsla())
             .map(|mut this| {
                 this.style().border_widths.right = Some(px(self.appearance.borders.width).into());
@@ -472,23 +548,48 @@ impl Manager {
             })
             .border_color(self.appearance.colors.border.unfocused.hsla())
             .child(
-                div()
-                    .text_size(px(self.appearance.typography.font_size + 2.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("TW App Manager"),
+                self.row()
+                    .justify_between()
+                    .when(!collapsed, |this| {
+                        this.child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .truncate()
+                                .child(if self.sidebar_width() < 174. {
+                                    "App Manager"
+                                } else {
+                                    "TW App Manager"
+                                }),
+                        )
+                    })
+                    .child(
+                        self.button("collapse-sidebar")
+                            .ghost()
+                            .icon(if collapsed { "expand" } else { "collapse" })
+                            .tooltip(if collapsed {
+                                "Expand sidebar"
+                            } else {
+                                "Collapse sidebar"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                    ),
             )
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(self.appearance.layout.spacing * 0.5))
-                    .children(filters.into_iter().map(|(filter, label)| {
+                    .gap_1()
+                    .children(filters.into_iter().map(|(filter, label, icon)| {
                         let selected = matches!(self.page, Page::Library) && self.filter == filter;
                         self.button(label)
-                            .label(label)
+                            .icon(icon)
+                            .tooltip(label)
+                            .when(!collapsed, |button| {
+                                button.label(label).w_full().justify_start()
+                            })
+                            .when(selected, |button| button.primary())
                             .when(!selected, |button| button.ghost())
-                            .w_full()
-                            .justify_start()
                             .disabled(self.busy)
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.show_library(filter, cx)),
@@ -498,18 +599,45 @@ impl Manager {
             .child(div().flex_1())
             .child(
                 self.button("settings")
-                    .label("Settings")
-                    .w_full()
-                    .justify_start()
+                    .icon("settings")
+                    .tooltip("Settings")
+                    .when(!collapsed, |button| {
+                        button.label("Settings").w_full().justify_start()
+                    })
+                    .when(matches!(self.page, Page::Settings(_)), |button| {
+                        button.primary()
+                    })
                     .when(!matches!(self.page, Page::Settings(_)), |button| {
                         button.ghost()
                     })
                     .disabled(self.busy)
                     .on_click(cx.listener(Self::show_settings)),
             )
+            .when(!collapsed, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .right_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(6.))
+                        .id("sidebar-resize")
+                        .cursor(gpui::CursorStyle::ResizeLeftRight)
+                        .hover(|this| {
+                            this.bg(self.appearance.colors.accent_primary.hsla().opacity(0.3))
+                        })
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                                this.sidebar_drag = Some((event.position.x, this.sidebar_width()));
+                                cx.stop_propagation();
+                            }),
+                        ),
+                )
+            })
     }
 
-    fn library(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn library(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let search = self.search.read(cx).value().to_lowercase();
         let apps: Vec<_> = self
             .apps
@@ -518,6 +646,9 @@ impl Manager {
             .filter(|app| {
                 search.is_empty()
                     || app.name.to_lowercase().contains(&search)
+                    || app
+                        .description()
+                        .is_some_and(|text| text.to_lowercase().contains(&search))
                     || app
                         .terminal_command
                         .as_ref()
@@ -530,11 +661,22 @@ impl Manager {
             Some(Kind::Native) => "Linux programs",
             Some(Kind::Web) => "Web apps",
         };
-        let empty = if !search.is_empty() {
-            "No apps match your search."
+        let grid = self.preferences.view == View::Grid;
+        let gap = self.appearance.layout.spacing;
+        let occupied = if self.preferences.sidebar_collapsed {
+            60.
         } else {
-            "No apps here yet. Select Add app to get started."
+            self.sidebar_width()
         };
+        let width = (f32::from(window.viewport_size().width)
+            - occupied
+            - 2. * self.appearance.layout.page_padding
+            - 2. * self.appearance.borders.window_width
+            - 1.)
+            .min(self.appearance.layout.content_width)
+            .max(100.);
+        let columns = ((width + gap) / (166. + gap)).floor().max(1.);
+        let card_width = ((width - (columns - 1.) * gap) / columns).floor();
         self.column()
             .child(
                 self.row()
@@ -543,81 +685,141 @@ impl Manager {
                     .child(
                         self.button("add-app")
                             .primary()
+                            .icon("plus")
                             .label("Add app")
-                            .on_click(cx.listener(Self::add)),
+                            .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
                     ),
             )
-            .child(self.input(&self.search).w_full())
+            .child(
+                self.row()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.input(&self.search).w_full()),
+                    )
+                    .children(
+                        [
+                            (View::List, "list", "List view"),
+                            (View::Grid, "grid", "Grid view"),
+                        ]
+                        .into_iter()
+                        .map(|(view, icon, label)| {
+                            self.button(icon)
+                                .icon(icon)
+                                .tooltip(label)
+                                .when(self.preferences.view == view, |this| this.primary())
+                                .when(self.preferences.view != view, |this| this.ghost())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.preferences.view = view;
+                                    this.persist_preferences(cx);
+                                }))
+                        }),
+                    ),
+            )
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap(px(self.appearance.layout.spacing))
+                    .gap(px(gap))
+                    .when(grid, |this| this.flex_wrap())
+                    .when(!grid, |this| this.flex_col())
                     .when(apps.is_empty(), |this| {
                         this.child(
-                            div()
-                                .map(|this| rounded(this, self.appearance.borders.card_radius))
-                                .map(|this| self.frame(this))
-                                .border_color(self.appearance.colors.border.unfocused.hsla())
-                                .bg(self.appearance.colors.surface.hsla())
-                                .p_5()
+                            self.card(div())
+                                .w_full()
+                                .p_4()
                                 .text_color(self.appearance.colors.text_muted.hsla())
-                                .child(empty),
+                                .child(if search.is_empty() {
+                                    "No apps in this view yet."
+                                } else {
+                                    "No apps match your search."
+                                }),
                         )
                     })
-                    .children(apps.into_iter().map(|app| self.app_row(app, cx))),
+                    .children(
+                        apps.into_iter()
+                            .map(|app| self.app_card(app, grid.then_some(card_width), window, cx)),
+                    ),
             )
     }
 
-    fn app_row(&self, app: &Entry, cx: &mut Context<Self>) -> gpui::Div {
-        let edit_app = app.clone();
-        let remove_app = app.clone();
-        let id = app.id.clone();
-        let kind = app.target.kind();
+    fn card(&self, element: gpui::Div) -> gpui::Div {
+        rounded(self.frame(element), self.appearance.borders.card_radius)
+            .bg(self.appearance.colors.surface.hsla())
+            .border_color(self.appearance.colors.border.unfocused.hsla())
+            .when(self.appearance.borders.shadows, |this| this.shadow_sm())
+    }
+
+    fn icon(&self, source: Option<PathBuf>, kind: Kind, size: f32) -> gpui::Div {
         let palette = &self.appearance.colors;
         let (symbol, color) = match kind {
-            Kind::AppImage => ("A", palette.accent_primary),
-            Kind::Native => ("L", palette.accent_secondary),
-            Kind::Web => ("W", palette.accent_tertiary),
+            Kind::AppImage => ("package", palette.accent_primary),
+            Kind::Native => ("terminal", palette.accent_secondary),
+            Kind::Web => ("web", palette.accent_tertiary),
         };
         let color = color.hsla();
-        let tile = palette.surface.hsla().blend(color.opacity(0.18));
-        let mut subtitle = kind.label().to_owned();
-        if let Some(command) = &app.terminal_command {
-            subtitle.push_str(&format!("  ·  {command}"));
-        }
-
-        self.row()
-            .p_3()
-            .gap(px(self.appearance.layout.spacing * 1.5))
-            .map(|this| rounded(this, self.appearance.borders.card_radius))
-            .bg(self.appearance.colors.surface.hsla())
-            .map(|this| self.frame(this))
-            .border_color(self.appearance.colors.border.unfocused.hsla())
-            .child(
-                div()
-                    .size(px(self.appearance.layout.icon_size))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .map(|this| rounded(this, self.appearance.borders.radius))
-                    .bg(tile)
+        rounded(div(), self.appearance.borders.radius)
+            .size(px(size))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(color)
+            .when(source.is_none(), |this| {
+                this.bg(palette.surface.hsla().blend(color.opacity(0.14)))
+            })
+            .child(match source {
+                Some(path) => app_icon(path, size * 0.82).into_any_element(),
+                None => glyph(symbol, size * 0.55)
                     .text_color(color)
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(match &app.icon {
-                        Some(path) => img(path.clone())
-                            .size(px(self.appearance.layout.icon_size * 0.725))
-                            .into_any_element(),
-                        None => div().child(symbol).into_any_element(),
-                    }),
-            )
+                    .into_any_element(),
+            })
+    }
+
+    fn app_card(
+        &self,
+        app: &Entry,
+        grid_width: Option<f32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let id = app.id.clone();
+        let edit = app.clone();
+        let view = cx.weak_entity();
+        let kind = app.target.kind();
+        let focus_id = SharedString::from(format!("focus-{}", app.id));
+        let focus = window
+            .use_keyed_state(focus_id, cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let palette = &self.appearance.colors;
+        let focus_color = palette.border.focused.hsla();
+        let hover = palette
+            .surface
+            .hsla()
+            .blend(palette.accent_primary.hsla().opacity(0.13));
+        let subtitle = app.description().unwrap_or(kind.label()).to_owned();
+        let size = self.appearance.layout.icon_size * if grid_width.is_some() { 1.32 } else { 1. };
+        let card = self
+            .card(self.row())
+            .p_3()
+            .gap_3()
+            .when_some(grid_width, |this, width| {
+                this.w(px(width))
+                    .min_h(px(128.))
+                    .flex_col()
+                    .justify_center()
+            })
+            .when(grid_width.is_none(), |this| this.w_full())
+            .child(self.icon(app.icon.clone(), kind, size))
             .child(
                 div()
-                    .flex_1()
                     .min_w_0()
+                    .max_w_full()
                     .flex()
                     .flex_col()
+                    .when(grid_width.is_none(), |this| this.flex_1())
+                    .when(grid_width.is_some(), |this| this.text_center())
                     .child(
                         div()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -627,40 +829,32 @@ impl Manager {
                     .child(
                         div()
                             .text_sm()
-                            .text_color(self.appearance.colors.text_muted.hsla())
+                            .text_color(palette.text_muted.hsla())
                             .truncate()
                             .child(subtitle),
                     ),
             )
-            .child(
-                self.button(SharedString::from(format!("launch-{}", app.id)))
-                    .label("Launch")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.status = None;
+            .id("app-card")
+            .track_focus(&focus.tab_stop(true))
+            .cursor_pointer()
+            .hover(move |this| this.bg(hover))
+            .focus(move |this| this.border_color(focus_color))
+            .on_click(cx.listener(move |this, _, window, cx| this.edit(&edit, window, cx)));
+        div()
+            .id(SharedString::from(app.id.clone()))
+            .child(card.context_menu(move |menu, _, _| {
+                let view = view.clone();
+                let id = id.clone();
+                menu.item(PopupMenuItem::new("Launch").on_click(move |_, _, cx| {
+                    let _ = view.update(cx, |this, cx| {
                         if let Err(error) = this.store.launch(&id, &[], false) {
                             this.error(error);
+                            cx.notify();
                         }
-                        cx.notify();
-                    })),
-            )
-            .child(
-                self.button(SharedString::from(format!("edit-{}", app.id)))
-                    .ghost()
-                    .label("Edit")
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.edit(&edit_app, window, cx)),
-                    ),
-            )
-            .child(
-                self.button(SharedString::from(format!("remove-{}", app.id)))
-                    .ghost()
-                    .label("Remove")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.status = None;
-                        this.page = Page::Remove(remove_app.clone());
-                        cx.notify();
-                    })),
-            )
+                    });
+                }))
+            }))
+            .into_any_element()
     }
 
     fn editor(&self, form: &Form, cx: &mut Context<Self>) -> impl IntoElement {
@@ -671,9 +865,39 @@ impl Manager {
             Kind::Native => "x86-64 executable",
             Kind::Web => "Website URL",
         };
-        let title = if new { "Add app" } else { "Edit app" };
+        let title = form
+            .entry
+            .as_ref()
+            .map_or_else(|| "Add app".to_owned(), |app| app.name.clone());
+        let selected_icon = optional_input(&form.icon, cx).map(PathBuf::from);
+        let preview = if form.draft.use_default_icon
+            || (form.draft.icon.is_some() && selected_icon.is_none())
+        {
+            None
+        } else {
+            let saved = form.entry.as_ref().and_then(|app| app.icon.clone());
+            if selected_icon == form.draft.icon {
+                saved.or(selected_icon)
+            } else {
+                selected_icon
+                    .and_then(|path| self.store.expand(&path).ok())
+                    .filter(|path| path.is_file())
+                    .or(saved)
+            }
+        };
         self.column()
-            .child(self.heading(title))
+            .child(
+                self.row()
+                    .child(
+                        self.button("back")
+                            .ghost()
+                            .icon("back")
+                            .tooltip("Back")
+                            .disabled(self.busy)
+                            .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))),
+                    )
+                    .child(self.heading(title)),
+            )
             .when(new && !form.from_file_manager, |this| {
                 this.child(self.row().children(Kind::ALL.map(|kind| {
                     self.button(kind.label())
@@ -737,8 +961,47 @@ impl Manager {
                         ),
                 )
             })
-            .child(self.field("Name", &form.name, self.busy))
-            .child(self.path_field("icon", "Icon file (optional)", &form.icon, false, cx))
+            .child(
+                self.row()
+                    .items_start()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.field("Name", &form.name, self.busy)),
+                    )
+                    .child(div().flex_1().min_w_0().child(self.field(
+                        "Description",
+                        &form.description,
+                        self.busy,
+                    ))),
+            )
+            .child(
+                self.card(self.row())
+                    .p_3()
+                    .child(self.icon(preview, kind, self.appearance.layout.icon_size))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.path_field("icon", "Icon override", &form.icon, false, cx))
+                            .when_some(
+                                form.entry
+                                    .as_ref()
+                                    .filter(|app| app.icon_override.is_none())
+                                    .and_then(|app| app.icon.as_ref()),
+                                |this, icon| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(self.appearance.colors.text_muted.hsla())
+                                            .truncate()
+                                            .child(format!("Current icon: {}", icon.display())),
+                                    )
+                                },
+                            ),
+                    ),
+            )
             .when(!new, |this| {
                 this.child(
                     self.row().child(
@@ -801,7 +1064,7 @@ impl Manager {
                                 "Save changes"
                             })
                             .disabled(self.busy)
-                            .on_click(cx.listener(Self::save)),
+                            .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     )
                     .child(
                         self.button("cancel-app")
@@ -809,11 +1072,26 @@ impl Manager {
                             .label("Cancel")
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.status = None;
-                                this.next_import(window, cx);
-                                cx.notify();
+                                this.cancel(window, cx);
                             })),
-                    ),
+                    )
+                    .child(div().flex_1())
+                    .when(form.entry.is_some(), |this| {
+                        this.child(
+                            self.button("remove-app")
+                                .danger()
+                                .label("Remove app")
+                                .disabled(self.busy)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Page::Edit(form) =
+                                        std::mem::replace(&mut this.page, Page::Library)
+                                    {
+                                        this.page = Page::Remove(form);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
     }
 
@@ -890,9 +1168,12 @@ impl Manager {
             )
             .child(self.path_field("web-browser", "Web app browser", &form.browser, false, cx))
             .child(
-                div().text_color(self.appearance.colors.text_muted.hsla()).text_sm().child(
-                    "Choose an executable that supports app mode, such as Helium or Chromium.",
-                ),
+                div()
+                    .text_color(self.appearance.colors.text_muted.hsla())
+                    .text_sm()
+                    .child(
+                        "Choose an executable that supports app mode, such as Helium or Chromium.",
+                    ),
             )
             .child(
                 self.row().child(
@@ -900,36 +1181,10 @@ impl Manager {
                         .primary()
                         .label("Save settings")
                         .disabled(self.busy)
-                        .on_click(cx.listener(Self::save_settings)),
-                ),
-            )
-            .child(
-                div()
-                    .map(|mut this| {
-                    this.style().border_widths.top = Some(px(self.appearance.borders.width).into());
-                    this
-                })
-                    .border_color(self.appearance.colors.border.unfocused.hsla())
-                    .pt_4()
-                    .flex()
-                    .flex_col()
-                    .gap(px(self.appearance.layout.spacing))
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Existing web apps"),
-                    )
-                    .child(div().text_color(self.appearance.colors.text_muted.hsla()).text_sm().child(
-                        "Bring apps created with the original webapp command into this library.",
-                    ))
-                    .child(
-                        self.row().child(
-                            self.button("import-webapps")
-                                .label("Import web apps")
-                                .disabled(self.busy)
-                                .on_click(cx.listener(Self::import_legacy)),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.save_settings(window, cx)),
                         ),
-                    ),
+                ),
             )
     }
 
@@ -990,102 +1245,282 @@ impl Manager {
                             .ghost()
                             .label("Cancel")
                             .disabled(self.busy)
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.show_library(this.filter, cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))),
                     ),
             )
+    }
+}
+
+impl Manager {
+    fn finish_resize(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_drag.take().is_some() {
+            self.persist_preferences(cx);
+        }
+    }
+
+    fn cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        match &self.page {
+            Page::Remove(..) => {
+                if let Page::Remove(form) = std::mem::replace(&mut self.page, Page::Library) {
+                    self.page = Page::Edit(form);
+                    self.focus.focus(window);
+                }
+            }
+            Page::Edit(_) => {
+                self.next_import(window, cx);
+                if self.queue.is_empty() && matches!(self.page, Page::Library) {
+                    self.focus.focus(window);
+                }
+            }
+            _ => {
+                self.show_library(self.filter, cx);
+                self.focus.focus(window);
+            }
+        }
+        cx.notify();
+    }
+
+    fn keyboard(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy || event.is_held {
+            return;
+        }
+        let modifiers = event.keystroke.modifiers;
+        let focus_free = window.focused(cx).is_none_or(|handle| handle == self.focus);
+        match event.keystroke.key.as_str() {
+            "enter" if !modifiers.modified() && focus_free => match self.page {
+                Page::Edit(_) => self.save(window, cx),
+                Page::Settings(_) => self.save_settings(window, cx),
+                _ => return,
+            },
+            _ => return,
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+    }
+
+    fn shortcut(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        match key {
+            "escape" if !matches!(self.page, Page::Library) => self.cancel(window, cx),
+            "escape" if self.toast.is_some() => {
+                self.toast = None;
+                cx.notify();
+            }
+            "b" => {
+                self.toggle_sidebar(cx);
+            }
+            "n" if matches!(self.page, Page::Library) => self.add(window, cx),
+            "f" if matches!(self.page, Page::Library) => {
+                self.search.update(cx, |input, cx| input.focus(window, cx));
+            }
+            "enter" => match self.page {
+                Page::Edit(_) => self.save(window, cx),
+                Page::Settings(_) => self.save_settings(window, cx),
+                _ => return,
+            },
+            _ => return,
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+    }
+
+    fn toast_widget(&self, toast: &Toast, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = &self.appearance.colors;
+        let accent = if toast.error {
+            palette.error
+        } else {
+            palette.accent_primary
+        }
+        .hsla();
+        let ratio = toast.remaining.as_secs_f32() / toast.duration.as_secs_f32();
+        let container = self
+            .row()
+            .px_3()
+            .py_2()
+            .min_h(px(44.))
+            .child(glyph(if toast.error { "alert" } else { "check" }, 18.).text_color(accent))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .child(toast.message.clone()),
+            )
+            .child(div().w_8().flex_none().when(toast.paused, |this| {
+                this.child(
+                    self.button("dismiss-toast")
+                        .ghost()
+                        .icon("close")
+                        .tooltip("Dismiss notification")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toast = None;
+                            cx.notify();
+                        })),
+                )
+            }));
+        self.card(div())
+            .absolute()
+            .bottom_4()
+            .right_4()
+            .w(px(365.))
+            .max_w(relative(0.88))
+            .overflow_hidden()
+            .shadow_md()
+            .border_color(accent.opacity(0.55))
+            .child(container)
+            .child(
+                div()
+                    .h(px(3.))
+                    .bg(accent.opacity(0.18))
+                    .child(div().size_full().w(relative(ratio)).bg(accent)),
+            )
+            .id("toast")
+            .occlude()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if let Some(toast) = &mut this.toast {
+                    let now = Instant::now();
+                    if !toast.paused {
+                        toast.remaining = toast.remaining.saturating_sub(now - toast.updated);
+                    }
+                    toast.updated = now;
+                    toast.paused = *hovered;
+                    cx.notify();
+                }
+            }))
     }
 }
 
 impl Render for Manager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match &self.page {
-            Page::Library => self.library(cx).into_any_element(),
+            Page::Library => self.library(window, cx).into_any_element(),
             Page::Edit(form) => self.editor(form, cx).into_any_element(),
             Page::Settings(form) => self.settings(form, cx).into_any_element(),
-            Page::Remove(app) => self.confirm_remove(app, cx).into_any_element(),
+            Page::Remove(form) => self
+                .confirm_remove(
+                    form.entry.as_ref().expect("remove opened for a saved app"),
+                    cx,
+                )
+                .into_any_element(),
         };
-        div()
+        let mut root = div()
+            .relative()
             .flex()
             .size_full()
-            .map(|mut element| {
-                element.style().border_widths = border_widths(self.appearance.borders.window_width);
-                let palette = &self.appearance.colors.border;
-                element.border_color(if window.is_window_active() {
-                    palette.focused.hsla()
-                } else {
-                    palette.outer.hsla()
-                })
-            })
             .text_color(self.appearance.colors.text_primary.hsla())
-            .text_size(px(self.appearance.typography.font_size))
-            .child(self.sidebar(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .when_some(self.appearance_error.clone(), |this, message| {
-                        this.child(
-                            div()
-                                .px(px(self.appearance.layout.page_padding))
-                                .py_2()
-                                .bg(self.appearance.colors.error.hsla())
-                                .text_color(self.appearance.colors.error_text.hsla())
-                                .text_sm()
-                                .child(format!("Appearance: {message}")),
-                        )
-                    })
-                    .when_some(self.status.clone(), |this, (message, is_error)| {
-                        this.child(
-                            div()
-                                .px(px(self.appearance.layout.page_padding))
-                                .py_2()
-                                .map(|mut this| {
-                                    this.style().border_widths.bottom =
-                                        Some(px(self.appearance.borders.width).into());
-                                    this
-                                })
-                                .border_color(self.appearance.colors.border.unfocused.hsla())
-                                .bg(if is_error {
-                                    self.appearance.colors.error.hsla()
-                                } else {
-                                    self.appearance.colors.surface.hsla()
-                                })
-                                .text_sm()
-                                .text_color(if is_error {
-                                    self.appearance.colors.error_text.hsla()
-                                } else {
-                                    self.appearance.colors.accent_primary.hsla()
-                                })
-                                .child(message),
-                        )
-                    })
-                    .when(self.busy, |this| {
-                        this.child(
-                            div()
-                                .h(px(2.))
-                                .bg(self.appearance.colors.accent_primary.hsla()),
-                        )
-                    })
-                    .child(
+            .text_size(px(self.appearance.typography.font_size));
+        root.style().border_widths = border_widths(self.appearance.borders.window_width);
+        let palette = &self.appearance.colors.border;
+        root.border_color(if window.is_window_active() {
+            palette.focused.hsla()
+        } else {
+            palette.outer.hsla()
+        })
+        .id("manager")
+        .track_focus(&self.focus)
+        .on_key_down(cx.listener(Self::keyboard))
+        .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+            if let Some((origin, width)) = this.sidebar_drag {
+                if event.pressed_button == Some(gpui::MouseButton::Left) {
+                    this.preferences.sidebar_width = Some(
+                        (width + f32::from(event.position.x - origin))
+                            .clamp(150., 320.)
+                            .round(),
+                    );
+                    cx.notify();
+                } else {
+                    this.finish_resize(cx);
+                }
+            }
+        }))
+        .on_mouse_up(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.finish_resize(cx)),
+        )
+        .on_mouse_up_out(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.finish_resize(cx)),
+        )
+        .child(self.sidebar(cx))
+        .child(
+            div()
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .when(self.busy, |this| {
+                    this.child(
                         div()
-                            .id("page-scroll")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .p(px(self.appearance.layout.page_padding))
-                            .child(
-                                div()
-                                    .max_w(px(self.appearance.layout.content_width))
-                                    .mx_auto()
-                                    .child(body),
-                            ),
-                    ),
-            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(2.))
+                            .bg(self.appearance.colors.accent_primary.hsla()),
+                    )
+                })
+                .child(
+                    div()
+                        .id("page-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p(px(self.appearance.layout.page_padding))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                if !window.default_prevented() {
+                                    this.focus.focus(window);
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .child(
+                            div()
+                                .max_w(px(self.appearance.layout.content_width))
+                                .mx_auto()
+                                .child(body),
+                        ),
+                )
+                .when_some(self.toast.as_ref(), |this, toast| {
+                    this.child(self.toast_widget(toast, cx))
+                }),
+        )
+    }
+}
+
+struct Toast {
+    message: String,
+    error: bool,
+    paused: bool,
+    duration: Duration,
+    remaining: Duration,
+    updated: Instant,
+}
+
+impl Toast {
+    fn new(message: String, error: bool) -> Self {
+        let duration = Duration::from_secs(if error { 9 } else { 5 });
+        Self {
+            message,
+            error,
+            paused: false,
+            duration,
+            remaining: duration,
+            updated: Instant::now(),
+        }
     }
 }
 
@@ -1094,6 +1529,8 @@ struct Form {
     from_file_manager: bool,
     name: Entity<InputState>,
     source: Entity<InputState>,
+    description: Entity<InputState>,
+    entry: Option<Entry>,
     icon: Entity<InputState>,
     command: Entity<InputState>,
     arguments: Entity<InputState>,
@@ -1116,8 +1553,19 @@ impl Form {
         Self {
             from_file_manager: draft.id.is_none() && !draft.source.is_empty(),
             name: text_input(&draft.name, "Use detected name", window, cx),
+            description: text_input(&draft.description, "Optional menu description", window, cx),
+            entry: None,
             source: text_input(&draft.source, source_hint, window, cx),
-            icon: text_input("", "Choose an image", window, cx),
+            icon: text_input(
+                &draft
+                    .icon
+                    .as_ref()
+                    .map(|path| path.to_string_lossy())
+                    .unwrap_or_default(),
+                "Use app icon",
+                window,
+                cx,
+            ),
             command: text_input(
                 draft.terminal_command.as_deref().unwrap_or_default(),
                 "e.g. notes",
@@ -1133,10 +1581,11 @@ impl Form {
     fn read(&self, cx: &App) -> Result<Draft> {
         let mut draft = self.draft.clone();
         draft.name = self.name.read(cx).value().to_string();
+        draft.description = self.description.read(cx).value().to_string();
         draft.source = self.source.read(cx).value().to_string();
         draft.icon = optional_input(&self.icon, cx).map(PathBuf::from);
-        if draft.icon.is_some() {
-            draft.use_default_icon = false;
+        if draft.icon != self.draft.icon {
+            draft.use_default_icon = draft.icon.is_none();
         }
         draft.terminal_command =
             optional_input(&self.command, cx).map(|value| value.trim().to_owned());

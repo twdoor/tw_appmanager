@@ -3,7 +3,11 @@
 [include.optional]
 files = ["noctalia.toml"]
 
-[colors]
+[ui]
+view = "list"
+sidebar_collapsed = false
+
+[appearance.colors]
 background = "#17191e"
 sidebar = "#1d2026"
 surface = "#21242b"
@@ -16,26 +20,26 @@ accent_text = "#13291f"
 error = "#ffb3ac"
 error_text = "#37130f"
 
-[colors.border]
+[appearance.colors.border]
 focused = "#a9e6c7"
 unfocused = "#333742"
 outer = "#333742"
 
-[typography]
+[appearance.typography]
 font_family = "" # Use the system font when empty.
 font_size = 14.0
 heading_size = 26.0
 
-[layout]
+[appearance.layout]
 sidebar_width = 182.0
 page_padding = 24.0
 content_width = 820.0
 spacing = 8.0
 icon_size = 40.0
 
-[borders]
+[appearance.borders]
 width = 1.0
 window_width = 0.0 # Optional border inside the app window.
 radius = 6.0
-card_radius = 8.0
+card_radius = 12.0
 shadows = false

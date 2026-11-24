@@ -1,12 +1,11 @@
-use std::{fs, io::ErrorKind, path::Path};
+use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use gpui::{App, Hsla, Window, WindowBackgroundAppearance, px, rgba};
 use gpui_component::Theme;
 use serde::{Deserialize, Deserializer};
-use toml::{Table, Value};
 
-pub const DEFAULT_CONFIG: &str = include_str!("../config/appearance.toml");
+use crate::config;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Appearance {
@@ -92,30 +91,20 @@ impl<'de> Deserialize<'de> for Color {
     }
 }
 
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Includes {
-    files: Vec<String>,
-    optional: OptionalIncludes,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct OptionalIncludes {
-    files: Vec<String>,
-}
-
 impl Appearance {
     pub fn defaults() -> Self {
-        toml::from_str(DEFAULT_CONFIG).expect("bundled appearance config is valid")
+        let default =
+            toml::from_str::<toml::Table>(config::DEFAULT_CONFIG).expect("valid bundled config");
+        Self::deserialize(default["appearance"].clone()).expect("valid bundled appearance")
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let mut merged: Table = toml::from_str(DEFAULT_CONFIG)?;
-        let root = read(path, true)?.unwrap_or_else(|| DEFAULT_CONFIG.to_owned());
-        merge_file(&mut merged, path, &root, 0)?;
-        let appearance = Self::deserialize(Value::Table(merged))
-            .with_context(|| format!("Invalid appearance in {}", path.display()))?;
+        let appearance = Self::deserialize(
+            config::load(path)?
+                .remove("appearance")
+                .context("Missing [appearance]")?,
+        )
+        .with_context(|| format!("Invalid appearance in {}", path.display()))?;
         appearance.validate()?;
         Ok(appearance)
     }
@@ -186,6 +175,10 @@ impl Appearance {
         colors.danger_foreground = palette.error_text.hsla();
         colors.danger_hover = colors.danger.blend(colors.foreground.opacity(0.12));
         colors.danger_active = colors.danger.blend(colors.background.opacity(0.18));
+        colors.popover = colors.muted;
+        colors.popover_foreground = colors.foreground;
+        colors.list = colors.muted;
+        colors.list_hover = colors.secondary_hover;
         colors.accent = colors.secondary_hover;
         colors.accent_foreground = colors.foreground;
         colors.scrollbar = colors.background;
@@ -208,71 +201,24 @@ impl Appearance {
     }
 }
 
-fn read(path: &Path, optional: bool) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if optional && error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("Could not read {}", path.display())),
-    }
-}
-
-fn merge_file(merged: &mut Table, path: &Path, text: &str, depth: usize) -> Result<()> {
-    ensure!(
-        depth < 16,
-        "Appearance includes are nested too deeply at {}",
-        path.display()
-    );
-    let mut layer: Table =
-        toml::from_str(text).with_context(|| format!("Could not parse {}", path.display()))?;
-    let includes = layer
-        .remove("include")
-        .map(Includes::deserialize)
-        .transpose()
-        .with_context(|| format!("Invalid includes in {}", path.display()))?
-        .unwrap_or_default();
-    merge(merged, layer);
-    let parent = path
-        .parent()
-        .context("Appearance file has no parent directory")?;
-    for (files, optional) in [(includes.files, false), (includes.optional.files, true)] {
-        for file in files {
-            let included = parent.join(file);
-            if let Some(text) = read(&included, optional)? {
-                merge_file(merged, &included, &text, depth + 1)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn merge(base: &mut Table, layer: Table) {
-    for (key, value) in layer {
-        match (base.get_mut(&key), value) {
-            (Some(Value::Table(base)), Value::Table(layer)) => merge(base, layer),
-            (_, value) => {
-                base.insert(key, value);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn layers_new_optional_files_over_user_settings() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let config = temp.path().join("appearance.toml");
+        let config = temp.path().join("config.toml");
         let generated = temp.path().join("generated.toml");
         fs::write(
             &config,
             r##"
 [include.optional]
 files = ["generated.toml"]
-[colors]
+[appearance.colors]
 background = "#112233"
-[borders]
+[appearance.borders]
 width = 3
 "##,
         )?;
@@ -281,9 +227,9 @@ width = 3
         fs::write(
             &generated,
             r##"
-[colors]
+[appearance.colors]
 background = "#44556680"
-[colors.border]
+[appearance.colors.border]
 focused = "#AABBCC"
 "##,
         )?;
@@ -291,7 +237,7 @@ focused = "#AABBCC"
         assert_eq!(synced.colors.background, Color(0x44556680));
         assert_eq!(synced.colors.border.focused, Color(0xaabbccff));
         assert_eq!(synced.borders, initial.borders);
-        fs::write(&generated, "[colors]\nbackground = \"invalid\"")?;
+        fs::write(&generated, "[appearance.colors]\nbackground = \"invalid\"")?;
         assert!(Appearance::load(&config).is_err());
         fs::remove_file(&generated)?;
         assert_eq!(Appearance::load(&config)?, initial);

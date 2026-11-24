@@ -18,30 +18,36 @@ Launch **TW App Manager** from the app menu, or choose it under **Open With** to
 
 - **AppImages** can stay in place or move into the folder in **Settings**. The manager reads Type 2 AppImage names and icons directly when available. Type 1 AppImages can be added with a manually chosen name and icon.
 - **Linux programs** are standalone x86-64 executables. Pick the executable from its existing folder, optionally provide an icon, and set launch arguments or a working directory if needed.
-- **Web apps** open in a browser that supports `--app`. Helium is the initial choice. The browser selected in **Settings** applies to every managed web app. Favicon lookup uses Google's favicon service and can be turned off in the add form or with `--no-favicon`.
-- **Existing web apps** can be brought in via **Settings → Import web apps**. The importer reads the original CLI's config and icons. It backs up matching launchers under the manager's data directory and replaces their menu entries with managed launchers.
+- **Web apps** open in a browser that supports `--app`. Helium is the initial choice. The browser selected in **Settings** applies to every managed web app. Favicon lookup uses Google's favicon service and can be turned off in the add form.
 - **Terminal commands** are optional per app. The launcher forwards extra arguments to the app. Removing an entry removes its menu launcher and terminal command. For AppImages the manager moved, the removal screen also offers to delete the file.
+
+Switch between list and grid using the library toolbar. Select an item to edit its description, icon, and launch settings. Right-click it to launch it. Remove is available in the editor. Drag the sidebar divider to resize it or use the panel button to collapse it.
+
+| Shortcut | Action |
+| --- | --- |
+| Ctrl+N | Add an app from the library |
+| Ctrl+F | Focus library search |
+| Ctrl+B | Toggle the sidebar |
+| Ctrl+Enter | Save an app or settings |
+| Enter | Save when the editor background has focus |
+| Escape | Go back or dismiss a notification |
 
 ## Terminal examples
 
 ```sh
 tw-appmanager add appimage ./Example.AppImage --move --terminal-command example
 tw-appmanager add native /path/to/tool --name Tool --icon ./tool.png -- --profile work
-tw-appmanager webapp -i Calendar --url https://calendar.example.com
-tw-appmanager webapp -l
-tw-appmanager webapp -r Calendar
-tw-appmanager webapp --import
 tw-appmanager list
 tw-appmanager launch example -- --help
 ```
 
 ## Storage
 
-Settings and the library are stored in `settings.toml` and `apps.toml` under `${XDG_CONFIG_HOME:-~/.config}/tw-appmanager`. Launchers go under `${XDG_DATA_HOME:-~/.local/share}/applications`. Managed icons and legacy launcher backups live under `${XDG_DATA_HOME:-~/.local/share}/tw-appmanager`.
+Settings and the library are stored in `config.toml` and `apps.toml` under `${XDG_CONFIG_HOME:-~/.config}/tw-appmanager`. Launchers go under `${XDG_DATA_HOME:-~/.local/share}/applications`. Managed icons and legacy launcher backups live under `${XDG_DATA_HOME:-~/.local/share}/tw-appmanager`.
 
 ## Appearance and live theme sync
 
-TW App Manager reads `${XDG_CONFIG_HOME:-~/.config}/tw-appmanager/appearance.toml`. The default file is installed by `install-desktop`. Configure the palette, window and control borders, corner radii, typography, spacing, and icon sizes there. Colors accept `#RRGGBB` or `#RRGGBBAA`. Changes apply to open windows, and an invalid edit keeps the last working appearance until corrected.
+TW App Manager reads the `[appearance]` section of `${XDG_CONFIG_HOME:-~/.config}/tw-appmanager/config.toml`. On the first run the app migrates earlier settings and appearance files and saves copies with a `.bak` suffix. Configure the palette, window and control borders, corner radii, typography, spacing, and icon sizes there. Colors accept `#RRGGBB` or `#RRGGBBAA`. Changes apply to open windows, and an invalid edit keeps the last working appearance until corrected.
 
 Like Umbriel, TW App Manager supports `[include]` and `[include.optional]` tables with a `files` array. Relative paths are resolved from the file that lists them. Includes are applied after the local values, with optional includes applied last. By default the app picks up an optional `noctalia.toml` in the same directory. A generated file can override just the palette so local typography and layout settings stay in place.
 
@@ -53,7 +59,7 @@ input_path = "$XDG_CONFIG_HOME/noctalia/templates/tw-appmanager.toml"
 output_path = "$XDG_CONFIG_HOME/tw-appmanager/noctalia.toml"
 ```
 
-No reload hook is needed. Umbriel controls any compositor-drawn window decorations. The `borders.window_width` setting draws a border inside the app.
+No reload hook is needed. Umbriel controls any compositor-drawn window decorations. The `appearance.borders.window_width` setting draws a border inside the app.
 
 ## Importing from Gear Lever
 
