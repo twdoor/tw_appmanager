@@ -67,6 +67,10 @@ pub struct Borders {
 pub struct Color(u32);
 
 impl Color {
+    pub fn as_rgba_hex(self) -> u32 {
+        self.0
+    }
+
     pub fn hsla(self) -> Hsla {
         rgba(self.0).into()
     }

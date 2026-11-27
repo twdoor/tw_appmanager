@@ -693,6 +693,12 @@ impl Store {
             &format!("X-TwAppManager-Id={}", desktop::ID),
             0o644,
         )?;
+        let icon = self
+            .applications
+            .with_file_name("icons")
+            .join("hicolor/scalable/apps")
+            .join(format!("{}.svg", desktop::ID));
+        transaction.write(&icon, desktop::ICON, 0o644, icon.try_exists()?)?;
         // Reconnect managed launchers if the manager executable has moved.
         for entry in self.entries()? {
             self.write_launcher(&mut transaction, &entry)?;

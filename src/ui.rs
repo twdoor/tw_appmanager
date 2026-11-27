@@ -32,7 +32,7 @@ use crate::{
     desktop::ID,
     font_picker::{FontChanged, FontPicker},
     library::{Draft, Entry, Kind, Settings, Store, Target},
-    widgets::app_icon,
+    widgets::{app_icon, brand_icon},
 };
 
 pub fn run(store: Store, paths: Vec<PathBuf>) -> Result<()> {
@@ -846,11 +846,16 @@ impl Manager {
                     .justify_between()
                     .when(!collapsed, |this| {
                         this.child(
-                            div()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .truncate()
-                                .child(APP_NAME),
+                            self.row()
+                                .gap_2()
+                                .child(brand_icon(self.appearance.colors.accent_primary))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .truncate()
+                                        .child(APP_NAME),
+                                ),
                         )
                     })
                     .child(

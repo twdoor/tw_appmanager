@@ -11,6 +11,7 @@ use crate::APP_NAME;
 
 // Keep the desktop ID stable for pinned launchers and MIME associations.
 pub const ID: &str = "io.github.twdoor.TwAppManager";
+pub const ICON: &[u8] = include_bytes!("../twck.svg");
 pub const APPIMAGE_TYPES: &str =
     "application/vnd.appimage;application/x-iso9660-appimage;application/x-appimage;";
 
@@ -72,7 +73,7 @@ pub fn manager_entry(executable: &Path) -> Result<String> {
     Ok(format!(
         "[Desktop Entry]\nType=Application\nName={APP_NAME}\n\
          Comment=Manage AppImages, native programs, and web apps\n\
-         Exec={command} %F\nIcon=application-x-executable\nTerminal=false\n\
+         Exec={command} %F\nIcon={ID}\nTerminal=false\n\
          Categories=Utility;\nMimeType={APPIMAGE_TYPES}\nX-TwAppManager-Id={ID}\n"
     ))
 }

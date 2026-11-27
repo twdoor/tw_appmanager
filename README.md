@@ -1,4 +1,4 @@
-# Twck
+# <img src="twck.svg" alt="" width="48" height="48"> Twck
 
 Twck is a Linux desktop app, built with Rust and [Ely GPUI Components](https://github.com/ELY-Open-Source/Ely-GPUI-Components), for organizing AppImages, standalone x86-64 executables, and websites that open in a browser’s app mode. It creates a desktop launcher for each entry and can give each app a short command you can run from the terminal.
 
