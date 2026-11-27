@@ -203,6 +203,7 @@ impl Store {
         let store = Self {
             bin: home.join(".local/bin"),
             home,
+            // Keep existing catalogs, theme includes, and managed files accessible.
             config: config.join("tw-appmanager"),
             data: data.join("tw-appmanager"),
             applications: data.join("applications"),
@@ -1046,6 +1047,7 @@ fn parse_url(value: &str) -> Result<Url> {
 }
 
 fn command_marker(id: &str) -> String {
+    // Keep recognizing scripts generated before the rename.
     format!("# TW App Manager: {id}")
 }
 

@@ -24,6 +24,7 @@ use gpui::{
 };
 
 use crate::{
+    APP_NAME,
     appearance::Appearance,
     appimage::detect_executable,
     color_picker::{ColorPicker, PickerEvent, encode_color, parse_hex},
@@ -52,14 +53,14 @@ pub fn run(store: Store, paths: Vec<PathBuf>) -> Result<()> {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(660.), px(480.))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("TW App Manager".into()),
+                        title: Some(APP_NAME.into()),
                         ..TitlebarOptions::default()
                     }),
                     app_id: Some(ID.into()),
                     ..WindowOptions::default()
                 },
                 |window, cx| {
-                    window.set_window_title("TW App Manager");
+                    window.set_window_title(APP_NAME);
                     cx.new(|cx| Manager::new(store, paths.into(), window, cx))
                 },
             );
@@ -849,11 +850,7 @@ impl Manager {
                                 .text_sm()
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .truncate()
-                                .child(if self.sidebar_width() < 174. {
-                                    "App Manager"
-                                } else {
-                                    "TW App Manager"
-                                }),
+                                .child(APP_NAME),
                         )
                     })
                     .child(

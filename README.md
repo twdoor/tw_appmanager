@@ -1,6 +1,6 @@
-# TW App Manager
+# Twck
 
-TW App Manager is a Linux desktop app, built with Rust and [Ely GPUI Components](https://github.com/ELY-Open-Source/Ely-GPUI-Components), for organizing AppImages, standalone x86-64 executables, and websites that open in a browser’s app mode. It creates a desktop launcher for each entry and can give each app a short command you can run from the terminal.
+Twck is a Linux desktop app, built with Rust and [Ely GPUI Components](https://github.com/ELY-Open-Source/Ely-GPUI-Components), for organizing AppImages, standalone x86-64 executables, and websites that open in a browser’s app mode. It creates a desktop launcher for each entry and can give each app a short command you can run from the terminal.
 
 - [Install](#install)
 - [Manage apps](#manage-apps)
@@ -17,18 +17,20 @@ Build on Linux with Rust 1.95 or later, a C compiler, and the GPUI development l
 On Fedora, the build dependencies include `libxkbcommon-devel`, `libxkbcommon-x11-devel`, `libxcb-devel`, `fontconfig-devel`, `freetype-devel`, and `wayland-devel`.
 
 ```sh
-git clone https://github.com/twdoor/tw_appmanager.git
-cd tw_appmanager
+git clone https://github.com/twdoor/twck.git
+cd twck
 cargo build --locked
-install -Dm755 target/debug/tw-appmanager "$HOME/.local/bin/tw-appmanager"
-"$HOME/.local/bin/tw-appmanager" install-desktop
+install -Dm755 target/debug/twck "$HOME/.local/bin/twck"
+"$HOME/.local/bin/twck" install-desktop
 ```
 
-Open **TW App Manager** from your application menu. Add `~/.local/bin` to your `PATH` if your shell does not already include it. This makes both `tw-appmanager` and any per-app terminal commands available. If you move the manager binary, run `install-desktop` from the new location. Edit and save any existing app entries to regenerate launchers that reference the old binary path.
+Open **Twck** from your application menu. Add `~/.local/bin` to your `PATH` if your shell does not already include it. This makes both `twck` and any per-app terminal commands available.
+
+When upgrading from TW App Manager, the `install-desktop` step above updates the app menu entry, desktop launchers, and terminal shortcuts to use `twck`. Twck reads your existing library and settings from the same directories.
 
 ## Manage apps
 
-Choose **Add app**, select an app type, and choose a file or enter a URL. When your file manager offers **Open With → TW App Manager**, you can use it to review a file for import. The manager reads the file header to distinguish an AppImage from an x86-64 Linux executable. You can also use `tw-appmanager --open` to review several files in sequence.
+Choose **Add app**, select an app type, and choose a file or enter a URL. When your file manager offers **Open With → Twck**, you can use it to review a file for import. The manager reads the file header to distinguish an AppImage from an x86-64 Linux executable. You can also use `twck --open` to review several files in sequence.
 
 | App type | Import and launch behavior |
 | --- | --- |
@@ -38,7 +40,7 @@ Choose **Add app**, select an app type, and choose a file or enter a URL. When y
 
 The **Terminal command** field creates an optional command for the entry, such as `notes`. Arguments passed to it are forwarded to the app. The **Launch arguments** field sets arguments to use every time a local app starts. For a multi-word argument, use quotes, for example `--profile "Work notes"`.
 
-Use the library toolbar to search by name, description, or terminal command and switch between list and grid. Click an entry to edit it, or right-click to launch it. **Remove** in the editor deletes the entry, its menu launcher, and its terminal command. If TW App Manager moved an AppImage into its managed directory, you can also choose to delete the file.
+Use the library toolbar to search by name, description, or terminal command and switch between list and grid. Click an entry to edit it, or right-click to launch it. **Remove** in the editor deletes the entry, its menu launcher, and its terminal command. If Twck moved an AppImage into its managed directory, you can also choose to delete the file.
 
 Drag the sidebar edge to change its width. Drag it inward past the labels to collapse it to icons, or use the toggle at the top.
 
@@ -91,15 +93,15 @@ The generated file supplies the palette and the manager picks up changes automat
 
 ## Command-line usage
 
-Run `tw-appmanager --help` for all commands or `tw-appmanager add --help` for file import options. Create web apps through **Add app** in the GUI. Use `tw-appmanager list` to find an entry’s ID for `launch` or `remove`.
+Run `twck --help` for all commands or `twck add --help` for file import options. Create web apps through **Add app** in the GUI. Use `twck list` to find an entry’s ID for `launch` or `remove`.
 
 ```sh
-tw-appmanager --open ./Example.AppImage ./tool.x86_64
-tw-appmanager add appimage ./Example.AppImage --keep-in-place --terminal-command example
-tw-appmanager add native ./tool.x86_64 --name "Example Tool" --icon ./tool.svg -- --profile work
-tw-appmanager list
-tw-appmanager launch example -- --help
-tw-appmanager remove example
+twck --open ./Example.AppImage ./tool.x86_64
+twck add appimage ./Example.AppImage --keep-in-place --terminal-command example
+twck add native ./tool.x86_64 --name "Example Tool" --icon ./tool.svg -- --profile work
+twck list
+twck launch example -- --help
+twck remove example
 ```
 
 Use `--move` to move an AppImage during import. Pass `--delete-appimage` to `remove` only when you want to delete an AppImage the manager previously moved. Arguments after `--` are saved with `add` and are supplied for that invocation only with `launch`.
@@ -110,10 +112,10 @@ List the installed entries and find the desktop IDs you want to take over.
 
 ```sh
 flatpak run it.mijorus.gearlever --list-installed --json
-tw-appmanager adopt-gear-lever example.desktop another.desktop
+twck adopt-gear-lever example.desktop another.desktop
 ```
 
-Replace the example IDs with yours. Adoption replaces the existing desktop launcher for each selected entry and preserves its desktop ID, AppImage path, and supported launch settings. Original desktop files are backed up under `tw-appmanager/gear-lever-launchers` in your XDG data directory. TW App Manager takes over the launchers. Gear Lever’s own library metadata is managed separately by Gear Lever.
+Replace the example IDs with yours. Adoption replaces the existing desktop launcher for each selected entry and preserves its desktop ID, AppImage path, and supported launch settings. Original desktop files are backed up under `tw-appmanager/gear-lever-launchers` in your XDG data directory. Twck takes over the launchers. Gear Lever’s own library metadata is managed separately by Gear Lever.
 
 ## Files and backups
 

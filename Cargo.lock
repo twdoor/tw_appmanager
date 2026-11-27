@@ -5639,7 +5639,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tw-appmanager"
+name = "twck"
 version = "0.1.0"
 dependencies = [
  "anyhow",

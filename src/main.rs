@@ -17,6 +17,8 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::library::{Draft, Kind, Store};
 
+const APP_NAME: &str = "Twck";
+
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -90,7 +92,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("TW App Manager: {error:#}");
+            eprintln!("{APP_NAME}: {error:#}");
             ExitCode::FAILURE
         }
     }

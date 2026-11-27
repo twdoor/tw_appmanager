@@ -7,6 +7,9 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
+use crate::APP_NAME;
+
+// Keep the desktop ID stable for pinned launchers and MIME associations.
 pub const ID: &str = "io.github.twdoor.TwAppManager";
 pub const APPIMAGE_TYPES: &str =
     "application/vnd.appimage;application/x-iso9660-appimage;application/x-appimage;";
@@ -67,7 +70,7 @@ pub fn exec(executable: &Path, arguments: &[&str]) -> Result<String> {
 pub fn manager_entry(executable: &Path) -> Result<String> {
     let command = exec(executable, &["--open"])?;
     Ok(format!(
-        "[Desktop Entry]\nType=Application\nName=TW App Manager\n\
+        "[Desktop Entry]\nType=Application\nName={APP_NAME}\n\
          Comment=Manage AppImages, native programs, and web apps\n\
          Exec={command} %F\nIcon=application-x-executable\nTerminal=false\n\
          Categories=Utility;\nMimeType={APPIMAGE_TYPES}\nX-TwAppManager-Id={ID}\n"
