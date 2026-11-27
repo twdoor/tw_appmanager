@@ -1,6 +1,6 @@
 # TW App Manager
 
-TW App Manager is a Linux desktop app, built with Rust and GPUI, for organizing AppImages, standalone x86-64 executables, and websites that open in a browser’s app mode. It creates a desktop launcher for each entry and can give each app a short command you can run from the terminal.
+TW App Manager is a Linux desktop app, built with Rust and [Ely GPUI Components](https://github.com/ELY-Open-Source/Ely-GPUI-Components), for organizing AppImages, standalone x86-64 executables, and websites that open in a browser’s app mode. It creates a desktop launcher for each entry and can give each app a short command you can run from the terminal.
 
 - [Install](#install)
 - [Manage apps](#manage-apps)
@@ -12,7 +12,7 @@ TW App Manager is a Linux desktop app, built with Rust and GPUI, for organizing 
 
 ## Install
 
-Build on Linux with a recent stable Rust toolchain, a C compiler, and the GPUI development libraries. The graphical app needs a Vulkan-capable graphics stack and a desktop portal with a file chooser backend. Install `desktop-file-utils` to update the desktop launcher database.
+Build on Linux with Rust 1.95 or later, a C compiler, and the GPUI development libraries. The graphical app needs a Vulkan-capable graphics stack and a desktop portal with a file chooser backend. Install `desktop-file-utils` to update the desktop launcher database.
 
 On Fedora, the build dependencies include `libxkbcommon-devel`, `libxkbcommon-x11-devel`, `libxcb-devel`, `fontconfig-devel`, `freetype-devel`, and `wayland-devel`.
 
@@ -47,16 +47,16 @@ Drag the sidebar edge to change its width. Drag it inward past the labels to col
 | `Ctrl+N` | Add an app from the library |
 | `Ctrl+F` | Focus library search |
 | `Ctrl+B` | Toggle the sidebar |
-| `Ctrl+Enter` | Save an app or settings |
+| `Ctrl+Enter` | Save an app or keep the color preview |
 | `Enter` | Leave a single-line editor field, save when the page itself has focus, or confirm a font selection |
-| `Shift+Enter` | Insert a line break in the description |
+| `Enter` or `Shift+Enter` in the description | Insert a line break |
 | `Escape` | Close a picker or go back from the editor or settings |
 
 The editor stores the full multiline description. Menu launchers show it as a single-line desktop comment.
 
 ## Settings
 
-Open **Settings** from the sidebar and choose **Save settings** to apply your edits. The full TOML example is in [config/config.toml](config/config.toml).
+Open **Settings** from the sidebar. Choices save immediately, and text fields save after a short pause, when you leave the field, or when you press Enter. The full TOML example is in [config/config.toml](config/config.toml).
 
 | Section | What you can set |
 | --- | --- |
@@ -66,9 +66,9 @@ Open **Settings** from the sidebar and choose **Save settings** to apply your ed
 | Executables | Default working directory with `apps.executable.working_directory`. Leave it empty to start each program in the directory containing its executable. |
 | Appearance | Palette, font family, font size, and corner radius. Open the font field and type to filter the available families. **System font** restores the default. Changing **Corner radius** updates panels and controls together. Use `0` for square corners. |
 
-Open a palette swatch to adjust hue, saturation, lightness, and opacity. You can also type or paste `#RRGGBB` or `#RRGGBBAA`, or copy the current value using the icon inside the hex field. Choose **Use color** to stage the edit and **Save settings** to apply it.
+Open a palette swatch to pick saturation and brightness, adjust hue and opacity, or reuse another palette color. Use the format menu to enter HEX, RGB, or HSV values. The copy button copies the current color as hex. The app previews color changes as you pick them. Choose **Use color** to save, or **Cancel** to restore the previous appearance.
 
-The TOML file also lets you set heading size under `[appearance.typography]`, content width and spacing under `[appearance.layout]`, and separate control and card radii under `[appearance.borders]`. Set `appearance.borders.window_width` to add an inset window outline. The app reloads appearance edits while it is open and keeps the last working appearance if an edit cannot be loaded.
+The TOML file also lets you set heading size under `[appearance.typography]`, content width and spacing under `[appearance.layout]`, and separate control and app card radii under `[appearance.borders]`. Ely controls and settings panels use filled backgrounds. `appearance.borders.width` sets the keyboard focus outline width for app cards. Set `appearance.borders.window_width` to add an inset window outline. The app reloads appearance edits while it is open and keeps the last working appearance if an edit cannot be loaded.
 
 ## Theme sync
 
@@ -87,7 +87,7 @@ input_path = "$XDG_CONFIG_HOME/noctalia/templates/tw-appmanager.toml"
 output_path = "$XDG_CONFIG_HOME/tw-appmanager/noctalia.toml"
 ```
 
-The generated file supplies the palette and the manager picks up changes automatically. In **Settings → Appearance**, choose **Follow theme** to use included colors or **Local colors** to use your own palette. Selecting a color in the picker switches to **Local colors** when you save. Other settings supplied by included files still apply.
+The generated file supplies the palette and the manager picks up changes automatically. In **Settings → Appearance**, choose **Follow theme** to use included colors or **Local colors** to use your own palette. Keeping a color from the picker switches to **Local colors**. Other settings supplied by included files still apply.
 
 ## Command-line usage
 

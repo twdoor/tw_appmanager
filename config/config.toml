@@ -11,22 +11,22 @@ sidebar_collapsed = false
 use_included_colors = true
 
 [appearance.colors]
-background = "#17191e"
-sidebar = "#1d2026"
-surface = "#21242b"
-text_primary = "#f1f1f3"
-text_muted = "#aeb2bf"
-accent_primary = "#a9e6c7"
-accent_secondary = "#b7c9f8"
-accent_tertiary = "#f1c5a5"
-accent_text = "#13291f"
+background = "#252525"
+sidebar = "#202020"
+surface = "#2c2c2c"
+text_primary = "#f3f1f0"
+text_muted = "#c4c2c0"
+accent_primary = "#f3f1f0"
+accent_secondary = "#8dc1ff"
+accent_tertiary = "#e8b45e"
+accent_text = "#252525"
 error = "#ffb3ac"
 error_text = "#37130f"
 
 [appearance.colors.border]
-focused = "#a9e6c7"
-unfocused = "#333742"
-outer = "#333742"
+focused = "#69a1e8"
+unfocused = "#555555"
+outer = "#555555"
 
 [appearance.typography]
 font_family = "" # Use the system font when empty.

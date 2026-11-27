@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use gpui::{App, Hsla, Window, WindowBackgroundAppearance, px, rgba};
-use gpui_component::Theme;
+use ely_core::theme::{Palette, Theme};
+use gpui::{App, Hsla, Window, WindowBackgroundAppearance, rgba};
 use serde::{Deserialize, Deserializer};
 
 use crate::config;
@@ -155,55 +155,37 @@ impl Appearance {
 
     pub fn apply(&self, system_font: &gpui::SharedString, window: &mut Window, cx: &mut App) {
         let palette = &self.colors;
-        let theme = Theme::global_mut(cx);
-        let colors = &mut theme.colors;
-        colors.background = palette.background.hsla();
-        colors.foreground = palette.text_primary.hsla();
-        colors.muted = palette.surface.hsla();
-        colors.muted_foreground = palette.text_muted.hsla();
-        colors.border = palette.border.unfocused.hsla();
-        colors.input = colors.border;
-        colors.ring = palette.border.focused.hsla();
-        colors.caret = colors.foreground;
-        colors.selection = palette.accent_primary.hsla().opacity(0.38);
-        colors.window_border = palette.border.outer.hsla();
-        colors.title_bar = palette.sidebar.hsla();
-        colors.title_bar_border = colors.border;
-        colors.primary = palette.accent_primary.hsla();
-        colors.primary_foreground = palette.accent_text.hsla();
-        colors.primary_hover = colors.primary.blend(colors.foreground.opacity(0.12));
-        colors.primary_active = colors.primary.blend(colors.background.opacity(0.18));
-        colors.secondary = colors
-            .muted
-            .blend(colors.foreground.opacity(0.12))
-            .blend(colors.primary.opacity(0.08));
-        colors.secondary_foreground = colors.foreground;
-        colors.secondary_hover = colors.secondary.blend(colors.foreground.opacity(0.10));
-        colors.secondary_active = colors.secondary.blend(colors.foreground.opacity(0.16));
-        colors.danger = palette.error.hsla();
-        colors.danger_foreground = palette.error_text.hsla();
-        colors.danger_hover = colors.danger.blend(colors.foreground.opacity(0.12));
-        colors.danger_active = colors.danger.blend(colors.background.opacity(0.18));
-        colors.popover = colors.muted;
-        colors.popover_foreground = colors.foreground;
-        colors.list = colors.muted;
-        colors.list_hover = colors.secondary_hover;
-        colors.list_active = colors.primary.opacity(0.16);
-        colors.list_active_border = colors.ring;
-        colors.accent = colors.secondary_hover;
-        colors.accent_foreground = colors.foreground;
-        colors.scrollbar = colors.background;
-        colors.scrollbar_thumb = colors.border;
-        colors.scrollbar_thumb_hover = colors.muted_foreground;
-        theme.font_family = if self.typography.font_family.is_empty() {
-            system_font.clone()
-        } else {
-            self.typography.font_family.clone().into()
-        };
-        theme.font_size = px(self.typography.font_size * (16. / 14.));
-        theme.radius = px(self.borders.radius);
-        theme.radius_lg = px(self.borders.card_radius);
-        theme.shadow = self.borders.shadows;
+        Theme::update(cx, |theme| {
+            let mut colors = Palette::dark(false);
+            colors.bg = palette.background.hsla();
+            colors.overlay = palette.surface.hsla();
+            colors.sunken = palette.sidebar.hsla();
+            colors.fg = palette.text_primary.hsla();
+            colors.surface = colors.overlay.blend(colors.fg.opacity(0.10));
+            colors.tooltip_bg = colors.surface;
+            colors.tooltip_fg = colors.fg;
+            colors.fg_muted = palette.text_muted.hsla();
+            colors.fg_subtle = colors.fg_muted;
+            colors.fg_disabled = colors.fg_muted.opacity(0.65);
+            colors.border = gpui::transparent_black();
+            colors.border_strong = colors.border;
+            colors.focus = palette.border.focused.hsla();
+            colors.accent = palette.accent_primary.hsla();
+            colors.on_accent = palette.accent_text.hsla();
+            colors.accent_hover = colors.accent.blend(colors.fg.opacity(0.12));
+            colors.hover = colors.surface.blend(colors.accent.opacity(0.09));
+            colors.active = colors.surface.blend(colors.accent.opacity(0.16));
+            colors.selection = colors.accent.opacity(0.38);
+            colors.danger = palette.error.hsla();
+            theme.colors = colors;
+            theme.font_family = if self.typography.font_family.is_empty() {
+                system_font.clone()
+            } else {
+                self.typography.font_family.clone().into()
+            };
+            theme.font_scale = self.typography.font_size / 13.;
+            theme.radius_scale = self.borders.radius / 6.;
+        });
         window.set_background_appearance(if palette.background.hsla().is_opaque() {
             WindowBackgroundAppearance::Opaque
         } else {

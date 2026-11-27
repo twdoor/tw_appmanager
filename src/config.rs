@@ -181,9 +181,14 @@ pub fn local_appearance(path: &Path) -> Result<Table> {
 }
 
 pub fn load(path: &Path) -> Result<Table> {
+    load_with(path, Table::new())
+}
+
+pub fn load_with(path: &Path, overrides: Table) -> Result<Table> {
     let mut merged = parse(path, DEFAULT_CONFIG)?;
     let root = read(path, false)?.context("Missing config")?;
-    let document = parse(path, &root)?;
+    let mut document = parse(path, &root)?;
+    merge(&mut document, overrides);
     let included_colors = document
         .get("appearance")
         .and_then(|appearance| appearance.get("use_included_colors"))
@@ -272,7 +277,7 @@ fn merge_file(
     Ok(())
 }
 
-fn merge(base: &mut Table, layer: Table) {
+pub fn merge(base: &mut Table, layer: Table) {
     for (key, value) in layer {
         match (base.get_mut(&key), value) {
             (Some(Value::Table(base)), Value::Table(layer)) => merge(base, layer),
@@ -346,17 +351,65 @@ move_to_directory = true"#,
     }
 
     #[test]
+    fn previews_color_overrides_without_saving_them() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("config.toml");
+        let original = r##"
+[include]
+files = ["theme.toml"]
+[appearance.colors]
+background = "#101010"
+"##;
+        fs::write(&path, original)?;
+        fs::write(
+            temp.path().join("theme.toml"),
+            r##"
+[appearance.colors]
+background = "#202020"
+[appearance.typography]
+font_size = 17
+"##,
+        )?;
+
+        let preview = load_with(
+            &path,
+            toml::toml! {
+                [appearance]
+                use_included_colors = false
+                [appearance.colors]
+                background = ("#303030")
+            },
+        )?;
+        assert_eq!(
+            preview["appearance"]["colors"]["background"].as_str(),
+            Some("#303030"),
+        );
+        assert_eq!(
+            preview["appearance"]["typography"]["font_size"].as_integer(),
+            Some(17),
+        );
+        assert_eq!(fs::read_to_string(&path)?, original);
+        assert_eq!(
+            load(&path)?["appearance"]["colors"]["background"].as_str(),
+            Some("#202020"),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn local_palette_retains_other_included_settings() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("config.toml");
         fs::write(
             &path,
-            r#"
+            r##"
 [include]
 files = ["theme.toml"]
 [appearance]
 use_included_colors = false
-"#,
+[appearance.colors]
+background = "#17191e"
+"##,
         )?;
         fs::write(
             temp.path().join("theme.toml"),

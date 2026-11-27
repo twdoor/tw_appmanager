@@ -2,15 +2,17 @@
 name = "tw-appmanager"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.95"
 description = "Linux library and launcher for AppImages, native programs, and web apps"
 
 [dependencies]
 anyhow = "1"
 backhand = "0.25"
 clap = { version = "4.6", features = ["derive"] }
+ely-core = "0.2.0"
 font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
-gpui = "0.2.2"
-gpui-component = "0.5.1"
+gpui = { package = "gpui-pre", version = "=0.3.10", default-features = false }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "wayland", "x11"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "ico"] }
 resvg = { version = "0.45", default-features = false }
 serde = { version = "1", features = ["derive"] }

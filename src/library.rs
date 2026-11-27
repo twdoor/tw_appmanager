@@ -278,15 +278,21 @@ impl Store {
 
     pub fn save_settings(
         &self,
-        settings: Option<Settings>,
+        apps: Option<toml::Table>,
         appearance: Option<toml::Table>,
     ) -> Result<()> {
-        if settings.is_none() && appearance.is_none() {
+        if apps.is_none() && appearance.is_none() {
             return Ok(());
         }
         let _lock = self.lock()?;
-        if let Some(settings) = &settings {
+        if let Some(apps) = &apps {
             let old = self.settings()?;
+            let mut updated = toml::Table::try_from(&old)?;
+            config::merge(&mut updated, apps.clone());
+            let settings = Settings::deserialize(toml::Value::Table(updated))?;
+            if settings == old && appearance.is_none() {
+                return Ok(());
+            }
             for (value, previous, label) in [
                 (
                     &settings.icons_directory,
@@ -317,12 +323,13 @@ impl Store {
             }
         }
         if let Some(appearance) = &appearance {
-            crate::appearance::Appearance::from_table(appearance.clone())?;
+            let mut updated = config::local_appearance(&self.config_path())?;
+            config::merge(&mut updated, appearance.clone());
+            crate::appearance::Appearance::from_table(updated)?;
         }
         self.edit_config(|document| {
-            if let Some(settings) = settings {
-                let values = toml::Table::try_from(&settings)?;
-                config::update_table(&mut document["apps"], &values)?;
+            if let Some(apps) = apps {
+                config::update_table(&mut document["apps"], &apps)?;
             }
             if let Some(appearance) = appearance {
                 config::update_table(&mut document["appearance"], &appearance)?;
