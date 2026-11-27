@@ -1,0 +1,74 @@
+name: Linux release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils shared-mime-info file patchelf \
+            libfontconfig1-dev libfreetype-dev libwayland-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev
+          rustup toolchain install 1.95 --profile minimal
+      - name: Build and test Twck
+        run: |
+          cargo +1.95 test --locked --release
+          cargo +1.95 build --locked --release
+          version=$(target/release/twck --version)
+          test "$GITHUB_REF_NAME" = "v${version#twck }" || {
+            echo "Tag $GITHUB_REF_NAME must match $version in Cargo.toml" >&2
+            exit 1
+          }
+      - name: Package AppImage
+        run: |
+          tools=$RUNNER_TEMP/twck-packaging
+          mkdir -p "$tools"
+          cd "$tools"
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          curl -fsSL -o runtime-x86_64 https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          sha256sum --check <<'SUMS'
+          ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool
+          2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  runtime-x86_64
+          SUMS
+          chmod +x appimagetool
+          cd "$GITHUB_WORKSPACE"
+          sh scripts/build-appimage.sh target/release/twck "$tools/appimagetool" "$tools/runtime-x86_64" dist
+      - name: Verify packaged CLI and desktop integration
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: |
+          test_dir=$(mktemp -d)
+          export XDG_CONFIG_HOME=$test_dir/config XDG_DATA_HOME=$test_dir/share
+          appimage=$PWD/dist/Twck-x86_64.AppImage
+          test "$("$appimage" --version)" = "$(target/release/twck --version)"
+          "$appimage" list
+          entry=$("$appimage" install-desktop)
+          desktop-file-validate "$entry"
+          grep -Fx "Exec=$appimage --open %F" "$entry"
+          (cd dist && sha256sum --check SHA256SUMS)
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          download="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          case "${GITHUB_REF_NAME%%+*}" in
+            *-*) flags+=(--prerelease) ;;
+          esac
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Download **Twck-x86_64.AppImage** for portable use, or install Twck for your user account with:
+
+              curl -fsSLo install.sh $download/install.sh && sh install.sh $GITHUB_REF_NAME
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/Twck-x86_64.AppImage dist/SHA256SUMS install.sh \
+            --verify-tag --generate-notes --notes-file "$RUNNER_TEMP/release-notes.md" "${flags[@]}"

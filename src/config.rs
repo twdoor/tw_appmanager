@@ -23,6 +23,7 @@ pub struct Preferences {
     pub sidebar_collapsed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<f32>,
+    pub include_prereleases: bool,
 }
 
 #[derive(Default, Deserialize)]

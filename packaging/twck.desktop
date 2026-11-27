@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Twck
+Comment=Manage AppImages, native programs, and web apps
+Exec=twck --open %F
+Icon=twck
+Terminal=false
+Categories=Utility;

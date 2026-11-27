@@ -12,7 +12,21 @@ Twck is a Linux desktop app, built with Rust and [Ely GPUI Components](https://g
 
 ## Install
 
-Build on Linux with Rust 1.95 or later, a C compiler, and the GPUI development libraries. The graphical app needs a Vulkan-capable graphics stack and a desktop portal with a file chooser backend. Install `desktop-file-utils` to update the desktop launcher database.
+On x86-64 Linux, install or upgrade to the latest stable release with:
+
+```sh
+curl -fsSLo install.sh https://github.com/twdoor/twck/releases/latest/download/install.sh && sh install.sh
+```
+
+The installer verifies the download, puts Twck in `~/.local/bin/twck`, and registers the application menu entry and **Open With** handlers for your account. It uses `curl`, `flock`, and the desktop utilities from `desktop-file-utils` and `shared-mime-info`. Add `~/.local/bin` to your `PATH` if your shell does not already include it. Rerun the command to upgrade, or pass a release tag to `sh install.sh` to install that version.
+
+For portable use, download **Twck-x86_64.AppImage** from [GitHub Releases](https://github.com/twdoor/twck/releases). Make it executable and run it directly. The same file also takes CLI commands such as `./Twck-x86_64.AppImage list`. The AppImage is built on Ubuntu 24.04. It uses the host graphics stack, desktop portal, and FUSE support.
+
+Twck uses `curl` to check for updates when the graphical app opens and links to any newer release. **Settings → Updates** shows the installed version, lets you check again, and has an **Include prereleases** switch. Update a portable copy by replacing the downloaded file, or rerun the installer for an installed copy.
+
+### Build from source
+
+Build on Linux with Rust 1.95 or later, a C compiler, and the GPUI development libraries. The graphical app needs a Vulkan-capable graphics stack and a desktop portal with a file chooser backend. Install `desktop-file-utils` and `shared-mime-info` to update the desktop launcher and file type databases.
 
 On Fedora, the build dependencies include `libxkbcommon-devel`, `libxkbcommon-x11-devel`, `libxcb-devel`, `fontconfig-devel`, `freetype-devel`, and `wayland-devel`.
 
@@ -28,9 +42,13 @@ Open **Twck** from your application menu. Add `~/.local/bin` to your `PATH` if y
 
 When upgrading from TW App Manager, the `install-desktop` step above updates the app menu entry, desktop launchers, and terminal shortcuts to use `twck`. Twck reads your existing library and settings from the same directories.
 
+### Publish a release
+
+Set the version in `Cargo.toml`, update `Cargo.lock`, and push a matching Git tag such as `v0.2.0`. The [release workflow](.github/workflows/release.yml) builds and tests Twck, then publishes the AppImage, checksum, and installer. A tag such as `v0.2.0-rc.1` publishes a prerelease.
+
 ## Manage apps
 
-Choose **Add app**, select an app type, and choose a file or enter a URL. When your file manager offers **Open With → Twck**, you can use it to review a file for import. The manager reads the file header to distinguish an AppImage from an x86-64 Linux executable. You can also use `twck --open` to review several files in sequence.
+Choose **Add app**, select an app type, and choose a file or enter a URL. Your file manager can offer **Open With → Twck** for AppImages and files ending in `.x86_64`. The manager reads the file header to distinguish an AppImage from an x86-64 Linux executable. You can also use `twck --open` to review several files in sequence.
 
 | App type | Import and launch behavior |
 | --- | --- |
@@ -67,6 +85,7 @@ Open **Settings** from the sidebar. Choices save immediately, and text fields sa
 | Web apps | Browser executable with `apps.web.browser_path`. The initial path is `/usr/bin/helium`. Choose a browser that supports `--app`. It applies to all managed web apps. |
 | Executables | Default working directory with `apps.executable.working_directory`. Leave it empty to start each program in the directory containing its executable. |
 | Appearance | Palette, font family, font size, and corner radius. Open the font field and type to filter the available families. **System font** restores the default. Changing **Corner radius** updates panels and controls together. Use `0` for square corners. |
+| Updates | Installed version, manual update check, and whether to include prereleases. |
 
 Open a palette swatch to pick saturation and brightness, adjust hue and opacity, or reuse another palette color. Use the format menu to enter HEX, RGB, or HSV values. The copy button copies the current color as hex. The app previews color changes as you pick them. Choose **Use color** to save, or **Cancel** to restore the previous appearance.
 

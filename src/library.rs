@@ -207,7 +207,7 @@ impl Store {
             config: config.join("tw-appmanager"),
             data: data.join("tw-appmanager"),
             applications: data.join("applications"),
-            executable: env::current_exe()?,
+            executable: manager_executable()?,
         };
         let path = store.config_path();
         if !path.try_exists()? {
@@ -683,7 +683,7 @@ impl Store {
 
     pub fn install_desktop(&self) -> Result<PathBuf> {
         let _lock = self.lock()?;
-        let defaults = desktop::current_appimage_defaults();
+        let defaults = desktop::current_file_defaults();
         let mut transaction = Transaction::default();
         let path = self.applications.join(format!("{}.desktop", desktop::ID));
         write_owned(
@@ -699,14 +699,24 @@ impl Store {
             .join("hicolor/scalable/apps")
             .join(format!("{}.svg", desktop::ID));
         transaction.write(&icon, desktop::ICON, 0o644, icon.try_exists()?)?;
+        let mime = self.applications.with_file_name("mime");
+        let package = mime.join("packages").join(format!("{}.xml", desktop::ID));
+        write_owned(
+            &mut transaction,
+            &package,
+            &desktop::mime_package(),
+            desktop::MIME_PACKAGE_MARKER,
+            0o644,
+        )?;
         // Reconnect managed launchers if the manager executable has moved.
         for entry in self.entries()? {
             self.write_launcher(&mut transaction, &entry)?;
             self.update_command(&mut transaction, Some(&entry), &entry)?;
         }
         transaction.commit();
+        desktop::refresh_mime_database(&mime);
         self.refresh_desktop_database();
-        desktop::restore_appimage_defaults(defaults);
+        desktop::restore_file_defaults(defaults);
         Ok(path)
     }
 
@@ -1035,6 +1045,18 @@ impl Store {
             );
         }
     }
+}
+
+fn manager_executable() -> Result<PathBuf> {
+    let executable = env::current_exe()?;
+    if let (Some(app_dir), Some(app_image)) = (env::var_os("APPDIR"), env::var_os("APPIMAGE"))
+        && Path::new(&app_image).is_absolute()
+        && let Ok(app_dir) = fs::canonicalize(app_dir)
+        && executable.starts_with(app_dir)
+    {
+        return Ok(app_image.into());
+    }
+    Ok(executable)
 }
 
 fn parse_url(value: &str) -> Result<Url> {

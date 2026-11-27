@@ -12,8 +12,28 @@ use crate::APP_NAME;
 // Keep the desktop ID stable for pinned launchers and MIME associations.
 pub const ID: &str = "io.github.twdoor.TwAppManager";
 pub const ICON: &[u8] = include_bytes!("../twck.svg");
-pub const APPIMAGE_TYPES: &str =
-    "application/vnd.appimage;application/x-iso9660-appimage;application/x-appimage;";
+const X86_TYPE: &str = "application/x-twck-x86-executable";
+const FILE_TYPES: [&str; 4] = [
+    "application/vnd.appimage",
+    "application/x-iso9660-appimage",
+    "application/x-appimage",
+    X86_TYPE,
+];
+pub const MIME_PACKAGE_MARKER: &str = "<!-- Managed by Twck -->";
+
+pub fn mime_package() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+{MIME_PACKAGE_MARKER}
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="{X86_TYPE}">
+    <comment>x86 Linux executable</comment>
+    <glob pattern="*.x86_64"/>
+  </mime-type>
+</mime-info>
+"#
+    )
+}
 
 pub fn text(value: &str) -> String {
     let content = value.trim_matches(' ');
@@ -70,22 +90,23 @@ pub fn exec(executable: &Path, arguments: &[&str]) -> Result<String> {
 
 pub fn manager_entry(executable: &Path) -> Result<String> {
     let command = exec(executable, &["--open"])?;
+    let file_types = FILE_TYPES.join(";");
     Ok(format!(
         "[Desktop Entry]\nType=Application\nName={APP_NAME}\n\
          Comment=Manage AppImages, native programs, and web apps\n\
          Exec={command} %F\nIcon={ID}\nTerminal=false\n\
-         Categories=Utility;\nMimeType={APPIMAGE_TYPES}\nX-TwAppManager-Id={ID}\n"
+         Categories=Utility;\nMimeType={file_types};\nX-TwAppManager-Id={ID}\n"
     ))
 }
 
-pub fn current_appimage_defaults() -> Vec<(&'static str, String)> {
-    APPIMAGE_TYPES
-        .split_terminator(';')
+pub fn current_file_defaults() -> Vec<(&'static str, String)> {
+    FILE_TYPES
+        .into_iter()
         .filter_map(|mime| default_handler(mime).map(|id| (mime, id)))
         .collect()
 }
 
-pub fn restore_appimage_defaults(defaults: Vec<(&str, String)>) {
+pub fn restore_file_defaults(defaults: Vec<(&str, String)>) {
     // Registering a new handler can change the fallback when there is no saved preference.
     for (mime, id) in defaults {
         if default_handler(mime).as_deref() == Some(&id) {
@@ -98,6 +119,17 @@ pub fn restore_appimage_defaults(defaults: Vec<(&str, String)>) {
         if !restored {
             eprintln!("Could not preserve {id} as the default for {mime}");
         }
+    }
+}
+
+pub fn refresh_mime_database(directory: &Path) {
+    match Command::new("update-mime-database").arg(directory).output() {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => eprintln!(
+            "Could not refresh the MIME database: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) => eprintln!("Could not run update-mime-database: {error}"),
     }
 }
 

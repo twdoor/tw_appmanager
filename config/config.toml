@@ -6,6 +6,7 @@ files = ["noctalia.toml"]
 [ui]
 view = "list"
 sidebar_collapsed = false
+include_prereleases = false
 
 [appearance]
 use_included_colors = true

@@ -11,7 +11,7 @@ use ely_core::{
     Assets,
     buttons::{Button, ButtonVariant, IconButton, SegmentedControl},
     feedback::EmptyState,
-    forms::{FormField, Input, InputEvent, TextInput},
+    forms::{FormField, Input, InputEvent, Switch, TextInput},
     layout::Section,
     navigation::NavItem,
     primitives::{FocusScope, Icon, IconName},
@@ -32,6 +32,7 @@ use crate::{
     desktop::ID,
     font_picker::{FontChanged, FontPicker},
     library::{Draft, Entry, Kind, Settings, Store, Target},
+    updates::{self, Update},
     widgets::{app_icon, brand_icon},
 };
 
@@ -93,6 +94,13 @@ enum Page {
     Remove(Box<Form>),
 }
 
+enum UpdateStatus {
+    Checking,
+    Current,
+    Available(Update),
+    Failed(String),
+}
+
 struct Manager {
     store: Store,
     apps: Vec<Entry>,
@@ -115,6 +123,8 @@ struct Manager {
     appearance_revision: u64,
     pending_setting: Option<(TextSetting, gpui::Task<()>)>,
     appearance_error: Option<String>,
+    update_status: UpdateStatus,
+    update_task: Option<gpui::Task<()>>,
 }
 
 impl Manager {
@@ -253,6 +263,8 @@ impl Manager {
             appearance_revision: 0,
             pending_setting: None,
             appearance_error,
+            update_status: UpdateStatus::Checking,
+            update_task: None,
         };
         cx.observe_window_activation(window, |_, _, cx| cx.notify())
             .detach();
@@ -264,7 +276,38 @@ impl Manager {
         this.reload();
         this.focus.focus(window, cx);
         this.next_import(window, cx);
+        this.check_for_update(window, cx);
         this
+    }
+
+    fn check_for_update(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.update_status = UpdateStatus::Checking;
+        let include_prereleases = self.preferences.include_prereleases;
+        let task = cx.background_spawn(async move { updates::check(include_prereleases) });
+        self.update_task = Some(cx.spawn_in(window, async move |view, cx| {
+            let result = task.await;
+            let _ = view.update_in(cx, |this, _, cx| {
+                this.update_status = match result {
+                    Ok(Some(update)) => UpdateStatus::Available(update),
+                    Ok(None) => UpdateStatus::Current,
+                    Err(error) => UpdateStatus::Failed(error.to_string()),
+                };
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn set_include_prereleases(&mut self, include: bool, window: &Window, cx: &mut Context<Self>) {
+        let previous = self.preferences.include_prereleases;
+        self.preferences.include_prereleases = include;
+        if let Err(error) = self.store.save_preferences(&self.preferences) {
+            self.preferences.include_prereleases = previous;
+            self.error(error);
+            cx.notify();
+            return;
+        }
+        self.check_for_update(window, cx);
     }
 
     fn reload(&mut self) {
@@ -966,6 +1009,9 @@ impl Manager {
                             .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
                     ),
             )
+            .when_some(self.update_notice(cx), |column, notice| {
+                column.child(notice)
+            })
             .child(
                 self.row()
                     .py_2()
@@ -1481,6 +1527,66 @@ impl Manager {
                     ),
             )
             .child(self.appearance_settings(form, cx))
+            .child(self.update_settings(cx))
+    }
+
+    fn update_notice(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let UpdateStatus::Available(update) = &self.update_status else {
+            return None;
+        };
+        Some(
+            self.row()
+                .flex_wrap()
+                .child(format!("Twck {} is available", update.version))
+                .child(
+                    Button::new("view-release", "View release").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            if let UpdateStatus::Available(update) = &this.update_status {
+                                cx.open_url(&update.url);
+                            }
+                        },
+                    )),
+                ),
+        )
+    }
+
+    fn update_settings(&self, cx: &mut Context<Self>) -> Section {
+        let view = cx.weak_entity();
+        let status = match &self.update_status {
+            UpdateStatus::Checking => "Checking for updates…",
+            UpdateStatus::Current => "No newer release found.",
+            UpdateStatus::Available(_) => "",
+            UpdateStatus::Failed(message) => message,
+        };
+        self.settings_group("Updates")
+            .child(
+                self.row()
+                    .justify_between()
+                    .flex_wrap()
+                    .child(format!("Installed version {}", updates::VERSION))
+                    .child(
+                        Button::new("check-for-updates", "Check for updates")
+                            .disabled(matches!(self.update_status, UpdateStatus::Checking))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.check_for_update(window, cx)
+                                }),
+                            ),
+                    ),
+            )
+            .child(
+                Switch::new("include-prereleases", self.preferences.include_prereleases)
+                    .label("Include prereleases")
+                    .on_change(move |include, window, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.set_include_prereleases(include, window, cx);
+                        });
+                    }),
+            )
+            .child(
+                self.update_notice(cx)
+                    .unwrap_or_else(|| self.setting_note(status.to_owned())),
+            )
     }
 
     fn settings_group(&self, title: &'static str) -> Section {
@@ -1493,11 +1599,11 @@ impl Manager {
             })
     }
 
-    fn setting_note(&self, text: &'static str) -> gpui::Div {
+    fn setting_note(&self, text: impl Into<SharedString>) -> gpui::Div {
         div()
             .text_sm()
             .text_color(self.appearance.colors.text_muted.hsla())
-            .child(text)
+            .child(text.into())
     }
 
     fn appearance_settings(&self, form: &SettingsForm, cx: &mut Context<Self>) -> impl IntoElement {

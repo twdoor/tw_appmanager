@@ -8,6 +8,7 @@ mod icons;
 mod library;
 mod transaction;
 mod ui;
+mod updates;
 mod widgets;
 
 use std::{ffi::OsString, path::PathBuf, process::ExitCode};
@@ -32,7 +33,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
-    /// Register the app and AppImage Open With handler for the current user.
+    /// Register the app and its Open With file types for the current user.
     InstallDesktop,
 
     /// Add an AppImage or x86-64 executable.
